@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecoroute"
+version = "0.1.0"
+description = "Sustainability-aware LLM router: send each prompt to the greenest model that can handle it."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Harsh Mishra" }]
+keywords = ["llm", "routing", "sustainability", "green-ai", "energy", "carbon"]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "httpx>=0.26",
+  "pydantic>=2.5",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[project.scripts]
+ecoroute = "ecoroute.cli:main"
+
+[tool.setuptools]
+packages = ["ecoroute", "ecoroute.providers"]
+
+[tool.setuptools.package-data]
+ecoroute = ["data/*.yaml", "data/*.jsonl", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = ["ISC004"]

@@ -1,0 +1,66 @@
+{"prompt": "hi", "tier": 1, "split": "train"}
+{"prompt": "Thanks!", "tier": 1, "split": "train"}
+{"prompt": "What is the capital of Japan?", "tier": 1, "split": "train"}
+{"prompt": "Who wrote Pride and Prejudice?", "tier": 1, "split": "train"}
+{"prompt": "Translate 'good morning' into Hindi.", "tier": 1, "split": "train"}
+{"prompt": "Convert 25 degrees Celsius to Fahrenheit.", "tier": 1, "split": "train"}
+{"prompt": "Give me a synonym for happy.", "tier": 1, "split": "train"}
+{"prompt": "When did India gain independence?", "tier": 1, "split": "train"}
+{"prompt": "Is a tomato a fruit? Yes or no.", "tier": 1, "split": "train"}
+{"prompt": "Suggest a title for my blog about plants.", "tier": 1, "split": "train"}
+{"prompt": "Explain why the sky is blue.", "tier": 2, "split": "train"}
+{"prompt": "Summarize this paragraph: Solar panels convert sunlight into electricity using photovoltaic cells. Their efficiency has improved steadily, and costs have fallen by over 80% in the last decade, making them one of the cheapest sources of new power.", "tier": 2, "split": "train"}
+{"prompt": "Fix the grammar in this sentence: me and him goes to the market yesterday.", "tier": 2, "split": "train"}
+{"prompt": "What is the difference between weather and climate?", "tier": 2, "split": "train"}
+{"prompt": "Write a short polite email asking my professor for a deadline extension.", "tier": 2, "split": "train"}
+{"prompt": "List 5 tips to save electricity at home.", "tier": 2, "split": "train"}
+{"prompt": "Explain how a refrigerator works in simple terms.", "tier": 2, "split": "train"}
+{"prompt": "Write a SQL query to count users by country.", "tier": 2, "split": "train"}
+{"prompt": "Define machine learning briefly.", "tier": 2, "split": "train"}
+{"prompt": "What does a Python list comprehension look like? Give one example.", "tier": 2, "split": "train"}
+{"prompt": "Write a 500 word essay on the impact of AI on employment.", "tier": 3, "split": "train"}
+{"prompt": "Compare renewable and non-renewable energy sources, with pros and cons of each.", "tier": 3, "split": "train"}
+{"prompt": "Write a Python function to reverse a linked list and add unit tests.", "tier": 3, "split": "train"}
+{"prompt": "Explain how the transformer attention mechanism works and why it scales quadratically.", "tier": 3, "split": "train"}
+{"prompt": "Write a cover letter for a software engineering internship highlighting my React and Node.js projects.", "tier": 3, "split": "train"}
+{"prompt": "Create a 7-day study plan for learning data structures, formatted as a markdown table.", "tier": 3, "split": "train"}
+{"prompt": "Debug this JavaScript: function add(a, b) { return a + b } console.log(add('2', 3)); Why does it print 23?", "tier": 3, "split": "train"}
+{"prompt": "Write a blog post about reducing food waste in college canteens.", "tier": 3, "split": "train"}
+{"prompt": "Analyze the causes of the 2008 financial crisis.", "tier": 3, "split": "train"}
+{"prompt": "Solve the equation 3x^2 - 12x + 9 = 0 and explain each step.", "tier": 3, "split": "train"}
+{"prompt": "Implement a REST API in FastAPI with JWT authentication, a PostgreSQL database layer, and unit tests for each endpoint.", "tier": 4, "split": "train"}
+{"prompt": "Analyze the trade-offs between microservices and a monolith for a startup with 5 engineers, and justify a recommendation.", "tier": 4, "split": "train"}
+{"prompt": "Derive the gradient of the softmax cross-entropy loss and explain why it simplifies so neatly.", "tier": 4, "split": "train"}
+{"prompt": "Write a detailed 1500 word report on water consumption of data centres, including causes, regional comparisons and mitigation strategies.", "tier": 4, "split": "train"}
+{"prompt": "Evaluate three approaches for detecting fraud in UPI transactions, compare their precision/recall trade-offs and outline an implementation plan.", "tier": 4, "split": "train"}
+{"prompt": "Refactor this class to use dependency injection, explain the design and add tests:\n```python\nclass Mailer:\n    def __init__(self):\n        self.smtp = SMTP('localhost')\n    def send(self, to, body):\n        self.smtp.sendmail('me', to, body)\n```", "tier": 4, "split": "train"}
+{"prompt": "Calculate the probability that at least two people in a room of 30 share a birthday, and explain the reasoning step by step.", "tier": 4, "split": "train"}
+{"prompt": "Explain the implications of the EU AI Act for a startup building a medical diagnosis app, including compliance requirements.", "tier": 4, "split": "train"}
+{"prompt": "Write an optimized algorithm to find the k most frequent elements in a stream, analyze its time and space complexity.", "tier": 4, "split": "train"}
+{"prompt": "Assess the pros and cons of nuclear vs solar for India's 2050 grid, considering cost, land use, carbon and reliability.", "tier": 4, "split": "train"}
+{"prompt": "Design a scalable, fault-tolerant distributed architecture for a ride-sharing platform serving 10 million users, covering data storage, real-time matching, payments and analyze the trade-offs of each component.", "tier": 5, "split": "train"}
+{"prompt": "Prove rigorously that the halting problem is undecidable, then derive Rice's theorem as a corollary with a formal proof.", "tier": 5, "split": "train"}
+{"prompt": "Write a literature review on carbon-aware scheduling for machine learning workloads, critique the methodologies, identify research gaps and propose three hypotheses for a thesis.", "tier": 5, "split": "train"}
+{"prompt": "Design an end-to-end production-ready ML pipeline for real-time anomaly detection on smart grid sensor data: ingestion, feature store, model training, drift detection, deployment on Kubernetes, and monitoring. Include architecture diagrams in text and justify every technology choice.", "tier": 5, "split": "train"}
+{"prompt": "Perform a security audit of an OAuth2 implementation: enumerate likely vulnerabilities, explain attack scenarios with edge cases, and provide remediations with code.", "tier": 5, "split": "train"}
+{"prompt": "Build a financial model and valuation for a solar microgrid startup in rural Maharashtra: revenue assumptions, capex, opex, IRR, sensitivity analysis, and regulatory risks.", "tier": 5, "split": "train"}
+{"prompt": "Formally prove the correctness and optimality of Dijkstra's algorithm, derive its complexity with a Fibonacci heap, and give counterexamples showing why it fails with negative edges.", "tier": 5, "split": "train"}
+{"prompt": "Write a 3000 word research paper on the energy and water footprint of large language models, with methodology, analysis, limitations and references.", "tier": 5, "split": "train"}
+{"prompt": "Good night!", "tier": 1, "split": "holdout"}
+{"prompt": "What is the boiling point of water at sea level?", "tier": 1, "split": "holdout"}
+{"prompt": "How many continents are there?", "tier": 1, "split": "holdout"}
+{"prompt": "Translate 'thank you very much' to Marathi.", "tier": 1, "split": "holdout"}
+{"prompt": "Write a short birthday message for my friend.", "tier": 2, "split": "holdout"}
+{"prompt": "Explain what a carbon footprint is in simple terms.", "tier": 2, "split": "holdout"}
+{"prompt": "List 3 benefits of electric vehicles.", "tier": 2, "split": "holdout"}
+{"prompt": "Write a JavaScript function that checks if a string is a palindrome.", "tier": 2, "split": "holdout"}
+{"prompt": "Compare Python and Java for building backend services, covering performance, ecosystem and learning curve.", "tier": 3, "split": "holdout"}
+{"prompt": "Write a 600 word article on how smart grids reduce electricity waste.", "tier": 3, "split": "holdout"}
+{"prompt": "Explain how gradient descent works and why the learning rate matters.", "tier": 3, "split": "holdout"}
+{"prompt": "Create a weekly meal plan for a vegetarian college student on a budget, formatted as a table.", "tier": 3, "split": "holdout"}
+{"prompt": "Implement an LRU cache in Python with O(1) operations, explain the design and include unit tests for edge cases.", "tier": 4, "split": "holdout"}
+{"prompt": "Analyze the trade-offs of training a model in a region with a low-carbon grid versus close to users, and justify a recommendation for an Indian startup.", "tier": 4, "split": "holdout"}
+{"prompt": "Calculate the expected value and variance of a binomial distribution, then derive them from first principles.", "tier": 4, "split": "holdout"}
+{"prompt": "Design a distributed, fault-tolerant event streaming architecture for real-time electricity grid telemetry across 5 states, covering ingestion, storage, analytics, alerting and disaster recovery, and justify each technology choice.", "tier": 5, "split": "holdout"}
+{"prompt": "Write a comprehensive literature review on AI for demand response in smart grids, critique the methodologies, identify research gaps and propose hypotheses for a thesis.", "tier": 5, "split": "holdout"}
+{"prompt": "Formally prove that every comparison-based sorting algorithm requires Omega(n log n) comparisons in the worst case, and derive the bound rigorously with a decision-tree argument.", "tier": 5, "split": "holdout"}

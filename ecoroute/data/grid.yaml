@@ -1,0 +1,14 @@
+# Electricity grid assumptions per region.
+#   carbon_g_per_kwh : average grid carbon intensity (gCO2e/kWh), approximate recent annual averages
+#   water_l_per_kwh  : off-site water consumed generating 1 kWh (thermal cooling, hydro evaporation)
+# Override live carbon intensity with ELECTRICITYMAPS_API_KEY (see README).
+regions:
+  global:   {name: "World average",        carbon_g_per_kwh: 470, water_l_per_kwh: 3.1, zone: null}
+  us:       {name: "United States avg",    carbon_g_per_kwh: 370, water_l_per_kwh: 3.1, zone: "US-MIDA-PJM"}
+  eu:       {name: "European Union avg",   carbon_g_per_kwh: 250, water_l_per_kwh: 2.5, zone: "DE"}
+  nordics:  {name: "Sweden",               carbon_g_per_kwh: 40,  water_l_per_kwh: 1.0, zone: "SE"}
+  india:    {name: "India",                carbon_g_per_kwh: 710, water_l_per_kwh: 3.4, zone: "IN-WE"}
+  france:   {name: "France",               carbon_g_per_kwh: 55,  water_l_per_kwh: 2.0, zone: "FR"}
+
+# Region used for models with region "local" (your own machine). Overridden by ECOROUTE_LOCAL_REGION.
+local_region: global

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EcoRoute</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/chart.umd.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 26C6 13 15 6 27 5c0 13-7 21-19 21" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M8 24 19 13" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+    <div>
+      <h1>EcoRoute</h1>
+      <p>Right-sized AI: every prompt goes to the greenest model that can handle it.</p>
+    </div>
+  </div>
+  <div class="status" id="status">connecting…</div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="playground">Playground</button>
+  <button class="tab" data-tab="impact">Impact dashboard</button>
+  <button class="tab" data-tab="models">Model efficiency</button>
+</nav>
+
+<main>
+  <!-- ============================ PLAYGROUND ============================ -->
+  <section id="playground" class="panel active">
+    <div class="composer card">
+      <label for="prompt" class="eyebrow">Prompt</label>
+      <textarea id="prompt" rows="4" placeholder="Ask anything — try 'What is the capital of Japan?' and then 'Design a fault-tolerant architecture for smart-grid telemetry…'"></textarea>
+      <div class="examples" id="examples"></div>
+      <div class="controls">
+        <div class="seg" id="policy" role="radiogroup" aria-label="Routing policy">
+          <button data-v="eco">Eco</button><button data-v="balanced" class="on">Balanced</button><button data-v="quality">Quality</button><button data-v="cost">Cost</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="localOnly"> Local models only</label>
+        <label class="chk"><input type="checkbox" id="useCache" checked> Use cache</label>
+        <div class="grow"></div>
+        <button class="btn ghost" id="btnRoute">Route only</button>
+        <button class="btn" id="btnRun">Route &amp; run</button>
+      </div>
+    </div>
+
+    <div id="result" class="result hidden">
+      <div class="grid2">
+        <div class="card decision">
+          <div class="eyebrow">Routed to</div>
+          <div class="chosen" id="rChosen"></div>
+          <div class="meta" id="rMeta"></div>
+          <div class="cx">
+            <div class="cx-head"><span>Prompt complexity</span><b id="rScore"></b></div>
+            <div class="cx-bar"><div id="rScoreBar"></div><span class="tick" style="left:12%"></span><span class="tick" style="left:20%"></span><span class="tick" style="left:48%"></span><span class="tick" style="left:74%"></span></div>
+            <div class="cx-tiers"><span>trivial</span><span>simple</span><span>moderate</span><span>complex</span><span>expert</span></div>
+            <div class="contrib" id="rContrib"></div>
+          </div>
+          <ul class="reasons" id="rReasons"></ul>
+        </div>
+        <div class="card">
+          <div class="eyebrow" id="impactTitle">Estimated impact vs. baseline</div>
+          <div class="impact" id="rImpact"></div>
+          <p class="fine" id="rBaseline"></p>
+        </div>
+      </div>
+
+      <div class="card" id="responseCard">
+        <div class="eyebrow">Response <span class="pill" id="rSource"></span></div>
+        <pre class="response" id="rText"></pre>
+      </div>
+
+      <div class="card">
+        <div class="eyebrow">How every model scored for this prompt</div>
+        <div class="table-wrap"><table class="tbl" id="rCands"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ IMPACT ============================ -->
+  <section id="impact" class="panel">
+    <div class="toolbar">
+      <div class="seg" id="range"><button data-v="1">24 h</button><button data-v="7">7 days</button><button data-v="30" class="on">30 days</button><button data-v="0">All</button></div>
+      <div class="grow"></div>
+      <button class="btn ghost" id="btnSeed" title="Simulate mode only">Load demo traffic</button>
+      <button class="btn ghost danger" id="btnReset">Reset metrics</button>
+    </div>
+    <div class="kpis" id="kpis"></div>
+    <div class="equiv card" id="equiv"></div>
+    <div class="grid2">
+      <div class="card"><div class="eyebrow">Energy used vs. always-flagship baseline (Wh)</div><div class="chart"><canvas id="chTime"></canvas></div></div>
+      <div class="card"><div class="eyebrow">Energy by prompt tier (Wh)</div><div class="chart"><canvas id="chTier"></canvas></div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><div class="eyebrow">Requests per model</div><div class="chart"><canvas id="chModels"></canvas></div></div>
+      <div class="card budget">
+        <div class="eyebrow">Monthly budgets</div>
+        <p class="fine">When a budget is exceeded, routing automatically switches to the <b>cost</b> (spend) or <b>eco</b> (energy) policy. Above 80% of spend, <b>quality</b> softens to <b>balanced</b>.</p>
+        <div class="bud-row"><label>Spend (USD) <input type="number" min="0" step="0.5" id="budUsd"></label><div class="bar"><div id="budUsdBar"></div></div><span id="budUsdTxt"></span></div>
+        <div class="bud-row"><label>Energy (Wh) <input type="number" min="0" step="1" id="budWh"></label><div class="bar"><div id="budWhBar"></div></div><span id="budWhTxt"></span></div>
+        <button class="btn ghost" id="btnBudget">Save budgets</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Recent requests</div>
+      <div class="table-wrap"><table class="tbl" id="recent"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================ MODELS ============================ -->
+  <section id="models" class="panel">
+    <div class="grid2">
+      <div class="card">
+        <div class="eyebrow">Does price track energy? (Wh per 1k output tokens vs. output price, log–log)</div>
+        <div class="chart"><canvas id="chPrice"></canvas></div>
+        <p class="fine">Open-weight models (filled) get a compute-based estimate from active parameters; closed models (hollow) are estimated from price — the idea being that price reflects GPU time, and GPU time is energy.</p>
+      </div>
+      <div class="card how">
+        <div class="eyebrow">How EcoRoute decides</div>
+        <ol>
+          <li><b>Score the prompt</b> — interpretable features (reasoning, code, maths, system design, requested length…) give a 0–1 complexity and a tier from 1 to 5.</li>
+          <li><b>Filter</b> — drop models that are under-powered for that tier, unavailable, or break your constraints.</li>
+          <li><b>Estimate impact</b> — energy (Wh), carbon (grid gCO₂e/kWh), water (on-site cooling + off-site generation) and cost for each candidate.</li>
+          <li><b>Rank</b> — weighted score of sustainability, cost, quality and latency for the chosen policy. Over-powered models get no extra quality credit.</li>
+          <li><b>Run &amp; measure</b> — call the winner (falling back on errors), measure real tokens, log everything against a baseline.</li>
+        </ol>
+        <p class="fine" id="snapshot"></p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Model efficiency leaderboard <span class="fine">· "typical request" = 200 input + 500 output tokens</span></div>
+      <div class="table-wrap"><table class="tbl" id="modelTbl"></table></div>
+    </div>
+  </section>
+</main>
+
+<footer>EcoRoute — sustainability in the age of AI. Impact figures are transparent estimates; see <code>docs/METHODOLOGY.md</code>.</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
