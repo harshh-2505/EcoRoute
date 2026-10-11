@@ -176,6 +176,15 @@ docker build -t ecoroute .
 docker run -p 8000:8000 --env-file .env ecoroute
 ```
 
+## Deploy on Vercel
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/harshh-2505/ecoroute)
+
+`app.py` exposes the FastAPI app, so Vercel detects it with no build settings (Framework Preset:
+FastAPI, or Other). With no keys it runs in simulate mode; add provider keys from `.env.example` as
+Vercel environment variables to route to real models. The request ledger is SQLite in `/tmp`, so
+dashboard data resets when the function cold-starts; use **Load demo traffic** to repopulate it.
+
 ## Development
 
 ```bash
