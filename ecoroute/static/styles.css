@@ -193,6 +193,31 @@ input:focus-visible, button:focus-visible { outline: 1px solid var(--accent); ou
 .scorebar { display: inline-block; width: 56px; height: 4px; background: var(--surface-2); vertical-align: middle; margin-left: 8px; }
 .scorebar i { display: block; height: 100%; background: var(--accent); box-shadow: 0 0 6px var(--glow); }
 .tbl .mono { font-size: 12px; display: inline-block; min-width: 20px; }
+.table-wrap.tall { max-height: 620px; overflow: auto; }
+.table-wrap.tall .tbl th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+.tbl.sortable th[data-k] { cursor: pointer; user-select: none; }
+.tbl.sortable th[data-k]:hover, .tbl.sortable th.sorted { color: var(--accent); }
+.tbl.sortable th.sorted::after { content: " ↓"; }
+.tbl.sortable th.sorted.asc::after { content: " ↑"; }
+.tbl tr.more td { text-align: center; color: var(--faint); font: 11px var(--mono); letter-spacing: .06em; }
+.tag { display: inline-block; margin-left: 8px; padding: 1px 5px; border: 1px solid var(--line-2); border-radius: 2px;
+  font: 500 9.5px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); vertical-align: 1px; }
+.tag.deprecated { color: var(--warn); border-color: currentColor; }
+.filters { display: flex; gap: 10px 14px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.filters input { flex: 0 1 220px; min-width: 0; padding: 7px 10px; border: 1px solid var(--line-2); border-radius: var(--r);
+  background: var(--bg-2); color: var(--ink); font: 12px var(--mono); }
+.filters input:focus { outline: none; border-color: var(--accent); }
+.filters .fine { margin: 0; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chips button { border: 1px solid var(--line); background: rgba(6,8,7,.5); color: var(--muted); padding: 5px 9px; border-radius: var(--r);
+  font: 11.5px var(--mono); cursor: pointer; transition: all .2s; }
+.chips button i { font-style: normal; color: var(--faint); margin-left: 5px; }
+.chips button:hover { color: var(--ink); }
+.chips button.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.chips button.on i { color: inherit; opacity: .7; }
+.btn.small { padding: 5px 10px; font-size: 11px; margin-bottom: 12px; }
+#sources a { color: var(--muted); }
+#sources a:hover { color: var(--accent); }
 
 /* ---------- impact dashboard ---------- */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 1px; margin-bottom: 16px;

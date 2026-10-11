@@ -68,6 +68,8 @@ class OpenAICompatibleProvider(Provider):
         return bool(self.api_key)
 
     async def complete(self, model, messages, max_tokens):
+        if model.api == "responses":
+            return await self._responses(model, messages, max_tokens)
         t0 = time.perf_counter()
         data = await self._post(
             f"{self.base_url}/chat/completions",
@@ -77,6 +79,21 @@ class OpenAICompatibleProvider(Provider):
         usage = data.get("usage") or {}
         text = (data["choices"][0]["message"].get("content") or "").strip()
         return ProviderResult(text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                              (time.perf_counter() - t0) * 1000)
+
+    async def _responses(self, model, messages, max_tokens):
+        """OpenAI Responses API, for models not served on /chat/completions (the *-pro models)."""
+        t0 = time.perf_counter()
+        system, rest = _split_system(messages)
+        body = {"model": model.model, "input": rest, "max_output_tokens": max_tokens}
+        if system:
+            body["instructions"] = system
+        data = await self._post(f"{self.base_url}/responses", body,
+                                {"Authorization": f"Bearer {self.api_key}"})
+        text = "".join(c.get("text", "") for item in data.get("output", []) if item.get("type") == "message"
+                       for c in item.get("content", []) if c.get("type") == "output_text")
+        u = data.get("usage") or {}
+        return ProviderResult(text.strip(), u.get("input_tokens", 0), u.get("output_tokens", 0),
                               (time.perf_counter() - t0) * 1000)
 
 
@@ -215,6 +232,9 @@ def build_providers(settings) -> dict[str, Provider]:
         "openai": OpenAICompatibleProvider("openai", "https://api.openai.com/v1", k.get("openai"), t,
                                            max_tokens_field="max_completion_tokens"),
         "groq": OpenAICompatibleProvider("groq", "https://api.groq.com/openai/v1", k.get("groq"), t),
+        "mistral": OpenAICompatibleProvider("mistral", "https://api.mistral.ai/v1", k.get("mistral"), t),
+        "deepseek": OpenAICompatibleProvider("deepseek", "https://api.deepseek.com", k.get("deepseek"), t),
+        "xai": OpenAICompatibleProvider("xai", "https://api.x.ai/v1", k.get("xai"), t),
         "anthropic": AnthropicProvider(k.get("anthropic"), t),
         "gemini": GeminiProvider(k.get("gemini"), t),
         "ollama": OllamaProvider(settings.ollama_host, max(t, 120)),

@@ -32,8 +32,10 @@ On the bundled 66-prompt benchmark (simulate mode, estimates), routing cuts ener
 | **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in), CLI. |
 | **Runs without keys** | Simulate mode exercises the full pipeline with no API keys — ideal for demos. |
 
-Providers: OpenAI, Anthropic, Google Gemini, Groq (open-weight models), Ollama (local), plus any
-OpenAI-compatible endpoint with a few lines in `ecoroute/providers/__init__.py`.
+Providers: OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI, Groq (open-weight models) and
+Ollama (local), plus any OpenAI-compatible endpoint with a few lines in `ecoroute/providers/__init__.py`.
+The bundled catalog covers **79 models**: every current text model each provider lists, with
+prices checked 2026-10-11 against the pricing pages linked in `ecoroute/data/catalog.yaml`.
 
 ## Quick start
 
@@ -59,6 +61,9 @@ GROQ_API_KEY=...        # cheapest way to try open-weight models (Llama, gpt-oss
 GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 ANTHROPIC_API_KEY=...
+MISTRAL_API_KEY=...
+DEEPSEEK_API_KEY=...
+XAI_API_KEY=...
 ```
 
 Local models: install [Ollama](https://ollama.com), then `ollama pull llama3.2:3b` and
@@ -157,7 +162,7 @@ rather than assuming it.
 | `ECOROUTE_MODE` | `auto` | `simulate`, `live`, or `auto` (live if any provider is reachable) |
 | `ECOROUTE_POLICY` | `balanced` | default policy |
 | `ECOROUTE_BASELINE_MODEL` | `openai-gpt-5` | counterfactual for savings |
-| `ECOROUTE_LOCAL_REGION` | `global` | grid region of your machine (`india`, `eu`, `us`, `nordics`, `france`) |
+| `ECOROUTE_LOCAL_REGION` | `global` | grid region of your machine (`india`, `eu`, `us`, `nordics`, `france`, `china`) |
 | `ECOROUTE_MONTHLY_BUDGET_USD` / `_ENERGY_BUDGET_WH` | `0` (off) | budgets (also editable in the dashboard) |
 | `ECOROUTE_CACHE`, `ECOROUTE_CACHE_TTL_HOURS` | `true`, `24` | response cache |
 | `ECOROUTE_STORE_PROMPTS` | `true` | store the first 120 chars of prompts in the log |
@@ -199,7 +204,7 @@ ecoroute/
   impact.py       energy / carbon / water / cost model
   router.py       policies, constraints, ranking
   service.py      orchestration: route → cache → execute → measure → log
-  providers/      OpenAI, Anthropic, Gemini, Groq, Ollama, simulator
+  providers/      OpenAI, Anthropic, Gemini, Mistral, DeepSeek, xAI, Groq, Ollama, simulator
   ledger.py       SQLite metrics, cache, budgets
   api.py          FastAPI app
   cli.py          command-line interface

@@ -48,3 +48,21 @@ def test_budget_status(service):
     asyncio.run(service.chat("Write a 300 word story about a river.", use_cache=False))
     b = service.budget_status()
     assert b["spent_usd"] > 0 and 0 < b["cost_ratio"] < 1
+
+
+def test_responses_api_models_use_responses_endpoint(service, monkeypatch):
+    from ecoroute.providers import OpenAICompatibleProvider
+
+    prov = OpenAICompatibleProvider("openai", "https://api.openai.com/v1", "k")
+    seen = {}
+
+    async def fake_post(url, json, headers=None):
+        seen["url"], seen["body"] = url, json
+        return {"output": [{"type": "reasoning"}, {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+                "usage": {"input_tokens": 7, "output_tokens": 3}}
+
+    monkeypatch.setattr(prov, "_post", fake_post)
+    model = service.catalog.get("openai-gpt-5.5-pro")
+    res = asyncio.run(prov.complete(model, [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}], 50))
+    assert seen["url"].endswith("/responses") and seen["body"]["instructions"] == "s"
+    assert (res.text, res.input_tokens, res.output_tokens) == ("hi", 7, 3)

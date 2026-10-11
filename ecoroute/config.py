@@ -80,5 +80,8 @@ class Settings:
                 "anthropic": os.getenv("ANTHROPIC_API_KEY") or None,
                 "gemini": os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None,
                 "groq": os.getenv("GROQ_API_KEY") or None,
+                "mistral": os.getenv("MISTRAL_API_KEY") or None,
+                "deepseek": os.getenv("DEEPSEEK_API_KEY") or None,
+                "xai": os.getenv("XAI_API_KEY") or None,
             },
         )

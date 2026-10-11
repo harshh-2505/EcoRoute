@@ -123,15 +123,31 @@ function renderDecision(d, out) {
     $("#rText").textContent = out.response;
   }
 
-  const bar = (v) => `<span class="mono">${v.toFixed(0)}</span><span class="scorebar"><i style="width:${v}%"></i></span>`;
+  lastDecision = { d, modelId };
+  renderCands();
+  $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// With dozens of models the full ranking is long: show the top rows, expandable to all.
+const CAND_ROWS = 10;
+let lastDecision = null, showAllCands = false;
+const bar = (v) => `<span class="mono">${v.toFixed(0)}</span><span class="scorebar"><i style="width:${v}%"></i></span>`;
+function renderCands() {
+  const { d, modelId } = lastDecision;
+  const all = d.candidates, n = all.length, elig = all.filter((c) => c.eligible).length;
+  const rows = showAllCands ? all : all.slice(0, CAND_ROWS);
+  $("#candCount").textContent = `${elig} of ${n} models eligible`;
+  $("#candToggle").textContent = showAllCands ? `Top ${CAND_ROWS} only` : `Show all ${n}`;
+  $("#candToggle").classList.toggle("hidden", n <= CAND_ROWS);
   $("#rCands").innerHTML = `<thead><tr><th>Model</th><th>Score</th><th>Sustainability</th><th>Cost</th><th>Quality</th><th>Est. energy</th><th>Est. cost</th><th>Status</th></tr></thead><tbody>` +
-    d.candidates.map((c) => `<tr class="${c.model_id === modelId ? "win" : c.eligible ? "" : "dim"}">
+    rows.map((c) => `<tr class="${c.model_id === modelId ? "win" : c.eligible ? "" : "dim"}">
       <td>${esc(c.display_name)}</td><td class="num">${c.eligible ? c.total.toFixed(1) : "—"}</td>
       <td>${bar(c.scores.sustainability)}</td><td>${bar(c.scores.cost)}</td><td>${bar(c.scores.quality)}</td>
       <td class="num">${fmt.wh(c.estimated.energy_wh)}</td><td class="num">${fmt.usd(c.estimated.cost_usd)}</td>
-      <td>${c.model_id === modelId ? "✔ chosen" : c.eligible ? "eligible" : esc(c.reason)}</td></tr>`).join("") + "</tbody>";
-  $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
+      <td>${c.model_id === modelId ? "✔ chosen" : c.eligible ? "eligible" : esc(c.reason)}</td></tr>`).join("") +
+    (rows.length < n ? `<tr class="more"><td colspan="8">+ ${n - rows.length} more models ranked below</td></tr>` : "") + "</tbody>";
 }
+$("#candToggle").addEventListener("click", () => { showAllCands = !showAllCands; renderCands(); });
 
 // 50-cell LED meter, coloured by the tier band each cell falls in (cut points match the router's tiers).
 function renderMeter(score) {
@@ -201,8 +217,11 @@ async function loadImpact() {
     { label: "Baseline", data: s.by_tier.map((r) => r.baseline_energy_wh), backgroundColor: warn + "33", borderColor: warn, borderWidth: 1 },
   ] }, options: { maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } } });
 
-  chart("#chModels", { type: "bar", data: { labels: s.by_model.map((r) => r.model_id), datasets: [
-    { label: "requests", data: s.by_model.map((r) => r.n), backgroundColor: acc + "cc", borderRadius: 1, barPercentage: .7 },
+  const TOP = 12, byModel = [...s.by_model].sort((a, b) => b.n - a.n);
+  const shown = byModel.slice(0, TOP), rest = byModel.slice(TOP).reduce((a, r) => a + r.n, 0);
+  if (rest) shown.push({ model_id: `${byModel.length - TOP} other models`, n: rest });
+  chart("#chModels", { type: "bar", data: { labels: shown.map((r) => r.model_id), datasets: [
+    { label: "requests", data: shown.map((r) => r.n), backgroundColor: acc + "cc", borderRadius: 1, barPercentage: .7 },
   ] }, options: { indexAxis: "y", maintainAspectRatio: false, plugins: { legend: { display: false } } } });
 
   const b = s.budget;
@@ -239,29 +258,81 @@ $("#btnBudget").addEventListener("click", async () => {
 });
 
 /* ---------------- models ---------------- */
+const PROVIDER_NAMES = { ollama: "local", openai: "OpenAI", anthropic: "Anthropic", gemini: "Gemini", groq: "Groq",
+  mistral: "Mistral", deepseek: "DeepSeek", xai: "xAI" };
+const provName = (p) => PROVIDER_NAMES[p] || p;
+const MODEL_COLS = [
+  ["Label", "label"], ["Model", "display_name"], ["Where", "provider"], ["Wh / 1k out", "wh", true], ["Estimate from", null],
+  ["$ in / out per M", "price_out", true], ["Typical energy", "wh", true], ["CO₂e", "carbon", true], ["Water", "water", true],
+  ["Sust.", "sustainability_score", true], ["Quality", "quality", true], ["Max tier", "max_tier", true], ["Available", "available"],
+];
+const sortVal = {
+  label: (x) => x.energy.label, wh: (x) => x.energy.wh_per_1k_output, carbon: (x) => x.typical_request.carbon_g,
+  water: (x) => x.typical_request.water_ml, provider: (x) => provName(x.provider),
+};
+const mState = { data: null, prov: "all", q: "", sort: "sustainability_score", desc: true };
+
 async function loadModels() {
   const m = await api("/v1/models");
+  mState.data = m;
   $("#snapshot").textContent = `Mode: ${m.mode}. Baseline model: ${m.baseline_model}. Prices: ${m.pricing_snapshot}.`;
-  $("#modelTbl").innerHTML = `<thead><tr><th>Label</th><th>Model</th><th>Where</th><th>Wh / 1k out</th><th>Estimate from</th><th>$ in / out per M</th><th>Typical energy</th><th>CO₂e</th><th>Water</th><th>Sust.</th><th>Max tier</th><th>Available</th></tr></thead><tbody>` +
-    m.models.map((x) => `<tr class="${x.available ? "" : "dim"}">
-      <td>${labelChip(x.energy.label)}</td><td>${esc(x.display_name)}</td>
-      <td>${x.kind === "local" ? "your device" : esc(x.provider)} · ${esc(x.grid_region)}${x.grid_live ? " (live)" : ""}</td>
-      <td class="num">${x.energy.wh_per_1k_output.toFixed(3)}</td><td>${esc(x.energy.method)} · ${esc(x.energy.confidence)}</td>
-      <td class="num">${x.price_in.toFixed(2)} / ${x.price_out.toFixed(2)}</td>
-      <td class="num">${fmt.wh(x.typical_request.energy_wh)}</td><td class="num">${fmt.g(x.typical_request.carbon_g)}</td>
-      <td class="num">${fmt.ml(x.typical_request.water_ml)}</td><td class="num">${x.sustainability_score.toFixed(0)}</td>
-      <td class="num">${x.max_tier}</td><td>${x.available ? "yes" : "—"}</td></tr>`).join("") + "</tbody>";
+  $("#sources").innerHTML = `${m.models.length} models from ${Object.keys(m.sources || {}).length} providers. Prices and model ids from: ` +
+    Object.entries(m.sources || {}).map(([p, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(provName(p))}</a>`).join(" · ");
+  const counts = {};
+  m.models.forEach((x) => (counts[x.provider] = (counts[x.provider] || 0) + 1));
+  $("#mProv").innerHTML = [["all", m.models.length], ...Object.entries(counts)].map(([p, n]) =>
+    `<button data-p="${esc(p)}" class="${p === mState.prov ? "on" : ""}">${p === "all" ? "All" : esc(provName(p))}<i>${n}</i></button>`).join("");
+  renderModelTable();
 
   const hosted = m.models.filter((x) => x.price_out > 0);
   const pts = (pred) => hosted.filter(pred).map((x) => ({ x: x.price_out, y: x.energy.wh_per_1k_output, name: x.display_name }));
   const acc = cssv("--accent");
   chart("#chPrice", { type: "scatter", data: { datasets: [
-    { label: "compute estimate (open weights)", data: pts((x) => x.energy.method !== "price"), backgroundColor: acc, pointRadius: 6 },
-    { label: "price estimate (closed)", data: pts((x) => x.energy.method === "price"), borderColor: acc, backgroundColor: "transparent", pointRadius: 6, borderWidth: 2 },
+    { label: "compute estimate (open weights)", data: pts((x) => x.energy.method !== "price"), backgroundColor: acc, pointRadius: 5 },
+    { label: "price estimate (closed)", data: pts((x) => x.energy.method === "price"), borderColor: acc, backgroundColor: "transparent", pointRadius: 5, borderWidth: 1.5 },
   ] }, options: { maintainAspectRatio: false, plugins: { legend: { position: "bottom" },
     tooltip: { callbacks: { label: (c) => `${c.raw.name}: $${c.raw.x}/M → ${c.raw.y.toFixed(3)} Wh/1k` } } },
-    scales: { x: { type: "logarithmic", min: 0.05, max: 20, title: { display: true, text: "output price, $ per M tokens" } },
-              y: { type: "logarithmic", min: 0.01, max: 1, title: { display: true, text: "Wh per 1k output tokens" } } } } });
+    scales: { x: { type: "logarithmic", min: 0.05, max: 250, ticks: { callback: decadeTick }, title: { display: true, text: "output price, $ per M tokens" } },
+              y: { type: "logarithmic", min: 0.01, max: 4, ticks: { callback: decadeTick }, title: { display: true, text: "Wh per 1k output tokens" } } } } });
 }
+
+const price = (v) => v.toFixed(Math.round(v * 100) === v * 100 ? 2 : 3);
+const decadeTick = (v) => ([0.01, 0.1, 1, 10, 100].includes(v) ? v : "");
+
+function renderModelTable() {
+  const m = mState.data; if (!m) return;
+  const q = mState.q.toLowerCase();
+  const get = sortVal[mState.sort] || ((x) => x[mState.sort]);
+  const rows = m.models
+    .filter((x) => mState.prov === "all" || x.provider === mState.prov)
+    .filter((x) => !q || `${x.display_name} ${x.model} ${x.provider} ${provName(x.provider)}`.toLowerCase().includes(q))
+    .sort((a, b) => { const va = get(a), vb = get(b); const c = va < vb ? -1 : va > vb ? 1 : 0; return mState.desc ? -c : c; });
+  $("#mCount").textContent = `${rows.length} of ${m.models.length} shown`;
+  $("#modelTbl").innerHTML = `<thead><tr>${MODEL_COLS.map(([h, k]) => k
+    ? `<th data-k="${k}" class="${k === mState.sort ? `sorted${mState.desc ? "" : " asc"}` : ""}">${h}</th>` : `<th>${h}</th>`).join("")}</tr></thead><tbody>` +
+    (rows.length ? rows.map((x) => `<tr class="${x.available ? "" : "dim"}">
+      <td>${labelChip(x.energy.label)}</td><td>${esc(x.display_name)}${x.status && x.status !== "active" ? `<span class="tag ${esc(x.status)}">${esc(x.status)}</span>` : ""}</td>
+      <td>${x.kind === "local" ? "your device" : esc(provName(x.provider))} · ${esc(x.grid_region)}${x.grid_live ? " (live)" : ""}</td>
+      <td class="num">${x.energy.wh_per_1k_output.toFixed(3)}</td><td>${esc(x.energy.method)} · ${esc(x.energy.confidence)}</td>
+      <td class="num">${price(x.price_in)} / ${price(x.price_out)}</td>
+      <td class="num">${fmt.wh(x.typical_request.energy_wh)}</td><td class="num">${fmt.g(x.typical_request.carbon_g)}</td>
+      <td class="num">${fmt.ml(x.typical_request.water_ml)}</td><td class="num">${x.sustainability_score.toFixed(0)}</td>
+      <td class="num">${x.quality}</td><td class="num">${x.max_tier}</td><td>${x.available ? "yes" : "—"}</td></tr>`).join("")
+      : `<tr><td class="empty" colspan="${MODEL_COLS.length}">No models match.</td></tr>`) + "</tbody>";
+}
+$("#mSearch").addEventListener("input", (e) => { mState.q = e.target.value.trim(); renderModelTable(); });
+$("#mProv").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  mState.prov = b.dataset.p;
+  $$("#mProv button").forEach((x) => x.classList.toggle("on", x === b));
+  renderModelTable();
+});
+$("#modelTbl").addEventListener("click", (e) => {
+  const th = e.target.closest("th[data-k]"); if (!th) return;
+  const k = th.dataset.k;
+  if (mState.sort === k) mState.desc = !mState.desc;
+  else { mState.sort = k; mState.desc = !["display_name", "provider", "label", "wh", "carbon", "water", "price_out"].includes(k); }
+  renderModelTable();
+});
 
 loadStatus();

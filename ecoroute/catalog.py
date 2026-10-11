@@ -25,6 +25,8 @@ class ModelSpec:
     params_total_b: float | None = None
     params_active_b: float | None = None
     device_watts: float | None = None
+    status: str = "active"  # "active" | "preview" | "deprecated"
+    api: str = "chat"  # "chat" | "responses" (OpenAI Responses-API-only models)
 
     @property
     def is_local(self) -> bool:
@@ -46,8 +48,9 @@ class Region:
 
 class Catalog:
     def __init__(self, models: list[ModelSpec], regions: dict[str, Region], local_region: str,
-                 pricing_snapshot: str = ""):
+                 pricing_snapshot: str = "", sources: dict[str, str] | None = None):
         self.models = models
+        self.sources = sources or {}
         self.regions = regions
         self.local_region = local_region
         self.pricing_snapshot = pricing_snapshot
@@ -74,7 +77,7 @@ class Catalog:
                 raise ValueError(f"Model {m.id}: max_tier must be 1-5")
             if m.is_local and not m.device_watts:
                 raise ValueError(f"Local model {m.id} needs device_watts")
-        return cls(models, regions, lr, raw.get("pricing_snapshot", ""))
+        return cls(models, regions, lr, raw.get("pricing_snapshot", ""), raw.get("sources") or {})
 
     def get(self, model_id: str) -> ModelSpec:
         try:
