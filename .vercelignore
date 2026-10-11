@@ -1,0 +1,7 @@
+.venv
+.github
+tests
+benchmarks
+docs
+*.db
+.env
