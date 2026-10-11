@@ -87,7 +87,8 @@
       </div>
 
       <div class="card">
-        <div class="eyebrow">How every model scored for this prompt</div>
+        <div class="card-head"><div class="eyebrow">How every model scored for this prompt <span class="fine" id="candCount"></span></div>
+          <button class="btn ghost small" id="candToggle"></button></div>
         <div class="table-wrap"><table class="tbl" id="rCands"></table></div>
       </div>
     </div>
@@ -144,8 +145,14 @@
       </div>
     </div>
     <div class="card">
-      <div class="eyebrow">Model efficiency leaderboard <span class="fine">“typical request” = 200 input + 500 output tokens</span></div>
-      <div class="table-wrap"><table class="tbl" id="modelTbl"></table></div>
+      <div class="eyebrow">Model efficiency leaderboard <span class="fine">“typical request” = 200 input + 500 output tokens · click a column to sort</span></div>
+      <div class="filters">
+        <input type="search" id="mSearch" placeholder="filter models…" aria-label="Filter models by name">
+        <div class="chips" id="mProv" role="group" aria-label="Filter by provider"></div>
+        <span class="fine" id="mCount"></span>
+      </div>
+      <div class="table-wrap tall"><table class="tbl sortable" id="modelTbl"></table></div>
+      <p class="fine" id="sources"></p>
     </div>
   </section>
 </main>

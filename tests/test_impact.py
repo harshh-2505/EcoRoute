@@ -74,3 +74,13 @@ def test_sustainability_score_prefers_small_models(catalog):
     s_small = sustainability_score(est.estimate(catalog.get("groq-gpt-oss-20b"), 100, 500))
     s_big = sustainability_score(est.estimate(catalog.get("openai-gpt-5"), 100, 500))
     assert s_small > s_big
+
+
+def test_catalog_covers_every_provider_with_sources(catalog):
+    providers = {m.provider for m in catalog.models}
+    assert providers >= {"ollama", "groq", "gemini", "openai", "anthropic", "mistral", "deepseek", "xai"}
+    assert providers <= set(catalog.sources)
+    assert len(catalog.models) >= 70
+    assert all(m.status in {"active", "preview", "deprecated"} for m in catalog.models)
+    assert all(m.api in {"chat", "responses"} for m in catalog.models)
+    assert all(energy_profile(m).wh_per_1k_output > 0 for m in catalog.models)

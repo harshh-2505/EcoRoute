@@ -78,7 +78,8 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
     async def models():
         available, mode = await svc.availability()
         return {"mode": mode, "baseline_model": svc.router.baseline_model,
-                "pricing_snapshot": svc.catalog.pricing_snapshot, "models": svc.models_view(available)}
+                "pricing_snapshot": svc.catalog.pricing_snapshot, "sources": svc.catalog.sources,
+                "models": svc.models_view(available)}
 
     @app.get("/v1/grid")
     async def grid():
