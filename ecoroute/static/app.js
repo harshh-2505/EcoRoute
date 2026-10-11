@@ -97,6 +97,7 @@ function renderDecision(d, out) {
     (out && out.fallback_used ? ` · <span style="color:var(--warn)">fallback used</span>` : "");
   $("#rScore").textContent = `${cx.score.toFixed(2)} · tier ${cx.tier} ${cx.tier_name} · ${cx.task_type}`;
   $("#rScoreBar").style.width = `${Math.max(2, cx.score * 100)}%`;
+  renderMeter(cx.score);
   $("#rContrib").innerHTML = Object.entries(cx.contributions).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
     .map(([k, v]) => `<span class="${v < 0 ? "neg" : ""}">${esc(k.replace(/_/g, " "))} ${v > 0 ? "+" : ""}${v.toFixed(2)}</span>`).join("");
   $("#rReasons").innerHTML = d.reasons.map((r) => `<li>${esc(r)}</li>`).join("");
@@ -132,13 +133,26 @@ function renderDecision(d, out) {
   $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// 50-cell LED meter, coloured by the tier band each cell falls in (cut points match the router's tiers).
+function renderMeter(score) {
+  const n = 50, lit = Math.max(1, Math.round(score * n));
+  const band = (f) => (f < 0.2 ? "--accent-2" : f < 0.48 ? "--accent" : f < 0.74 ? "--warn" : "--danger");
+  $("#rMeter").innerHTML = Array.from({ length: n }, (_, i) => {
+    const on = i < lit;
+    return `<i class="${on ? "on" : ""}${i === lit - 1 ? " edge" : ""}" style="--c:var(${band(i / n)});transition-delay:${on ? i * 12 : 0}ms"></i>`;
+  }).join("");
+}
+
 /* ---------------- impact dashboard ---------------- */
 const charts = {};
 function chart(id, cfg) {
   charts[id]?.destroy();
   const ink = cssv("--muted"), line = cssv("--line");
   Chart.defaults.color = ink; Chart.defaults.borderColor = line;
-  Chart.defaults.font.family = "IBM Plex Sans";
+  Chart.defaults.font.family = "Geist Mono"; Chart.defaults.font.size = 11;
+  Chart.defaults.plugins.legend.labels.boxWidth = 10; Chart.defaults.plugins.legend.labels.boxHeight = 10;
+  Object.assign(Chart.defaults.plugins.tooltip, { backgroundColor: cssv("--raise"), borderColor: cssv("--line-2"), borderWidth: 1,
+    titleColor: cssv("--ink"), bodyColor: cssv("--ink"), cornerRadius: 2, padding: 10 });
   charts[id] = new Chart($(id), cfg);
 }
 
@@ -175,18 +189,20 @@ async function loadImpact() {
     return days && days <= 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : days <= 7 && days ? d.toLocaleString([], { weekday: "short", hour: "2-digit" }) : d.toLocaleDateString();
   });
   chart("#chTime", { type: "line", data: { labels, datasets: [
-    { label: "EcoRoute", data: ts.map((r) => r.energy_wh), borderColor: acc, backgroundColor: acc + "33", fill: true, tension: .3, pointRadius: 2 },
+    { label: "EcoRoute", data: ts.map((r) => r.energy_wh), borderColor: acc, borderWidth: 2, fill: true, tension: .35, pointRadius: 0, pointHoverRadius: 4,
+      backgroundColor: (c) => { const a = c.chart.chartArea; if (!a) return acc + "22";
+        const g = c.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom); g.addColorStop(0, acc + "55"); g.addColorStop(1, acc + "00"); return g; } },
     { label: "Baseline", data: ts.map((r) => r.baseline_energy_wh), borderColor: warn, borderDash: [5, 4], tension: .3, pointRadius: 0 },
   ] }, options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, plugins: { legend: { position: "bottom" } } } });
 
   const tiers = ["trivial", "simple", "moderate", "complex", "expert"];
   chart("#chTier", { type: "bar", data: { labels: s.by_tier.map((r) => `${r.tier} ${tiers[r.tier - 1]}`), datasets: [
     { label: "EcoRoute", data: s.by_tier.map((r) => r.energy_wh), backgroundColor: acc },
-    { label: "Baseline", data: s.by_tier.map((r) => r.baseline_energy_wh), backgroundColor: warn + "99" },
+    { label: "Baseline", data: s.by_tier.map((r) => r.baseline_energy_wh), backgroundColor: warn + "33", borderColor: warn, borderWidth: 1 },
   ] }, options: { maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } } });
 
   chart("#chModels", { type: "bar", data: { labels: s.by_model.map((r) => r.model_id), datasets: [
-    { label: "requests", data: s.by_model.map((r) => r.n), backgroundColor: acc },
+    { label: "requests", data: s.by_model.map((r) => r.n), backgroundColor: acc + "cc", borderRadius: 1, barPercentage: .7 },
   ] }, options: { indexAxis: "y", maintainAspectRatio: false, plugins: { legend: { display: false } } } });
 
   const b = s.budget;
