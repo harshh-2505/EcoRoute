@@ -36,6 +36,7 @@ class Constraints:
     force_model: str | None = None           # bypass routing
     needs_tools: bool = False                # request carries tool/function definitions
     cascade: bool | None = None              # check the answer and escalate on failure (None = server default)
+    concise: bool | None = None              # ask for a short answer and cap output tokens (None = server default)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> Constraints:

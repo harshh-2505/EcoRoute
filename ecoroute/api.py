@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__
+from . import __version__, reporting
 from .complexity import TIER_NAMES, analyze
 from .impact import equivalents
 from .router import POLICIES, POLICY_DESCRIPTIONS
@@ -64,6 +64,21 @@ class FeedbackRequest(BaseModel):
         if r in ("down", "-1", "bad"):
             return -1
         raise ValueError("rating must be 'up' or 'down'")
+
+
+class BatchItem(BaseModel):
+    custom_id: str | None = None
+    prompt: str | None = None
+    messages: list[Message] | None = None
+    policy: str | None = None
+    constraints: dict | None = None
+
+
+class BatchRequest(BaseModel):
+    requests: list[BatchItem]
+    deadline_hours: float = Field(24, ge=0, le=168, description="Latest time to run, in hours from now")
+    policy: str = "eco"
+    max_carbon_g_per_kwh: float | None = Field(None, description="Run early when the grid is at or below this")
 
 
 class BudgetRequest(BaseModel):
@@ -271,6 +286,50 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
         if row is None:
             raise HTTPException(409, "The baseline or judge model isn't reachable in this mode.")
         return row
+
+    @app.get("/v1/report")
+    async def report(c: CallerDep, month: str | None = None, team: str | None = None,
+                     format: str = Query("json", pattern="^(json|csv|html)$")):
+        """Monthly sustainability report with savings, uncertainty ranges and methodology."""
+        try:
+            r = reporting.build(svc, month, team_scope(c, team))
+        except ValueError as e:
+            _bad(e)
+        name = f"ecoroute-report-{r['month']}{'-' + r['team'] if r['team'] else ''}"
+        if format == "csv":
+            return PlainTextResponse(reporting.to_csv(r), media_type="text/csv",
+                                     headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
+        if format == "html":
+            return HTMLResponse(reporting.to_html(r))
+        return r
+
+    @app.post("/v1/batch")
+    async def batch_submit(req: BatchRequest, c: CallerDep):
+        """Queue non-urgent requests; they run when the grid is cleaner, or by the deadline."""
+        items = [{k: v for k, v in it.model_dump(exclude_none=True).items()} for it in req.requests]
+        for it in items:
+            if "messages" in it:
+                it["messages"] = [{k: v for k, v in m.items() if v is not None} for m in it["messages"]]
+        try:
+            return await svc.submit_batch(items, req.deadline_hours, c.team, req.policy, req.max_carbon_g_per_kwh)
+        except ValueError as e:
+            _bad(e)
+
+    @app.get("/v1/batch/{job_id}")
+    async def batch_get(job_id: str, c: CallerDep):
+        job = svc.ledger.batch_get(job_id)
+        if not job or (c.scoped and job["team"] != c.team):
+            raise HTTPException(404, f"No batch {job_id}")
+        return job
+
+    @app.api_route("/v1/batch-run", methods=["GET", "POST"])
+    async def batch_run(request: Request, force: bool = False):
+        """Process due batch items. Call it from a scheduler (Vercel Cron sends ``Bearer $CRON_SECRET``)."""
+        tok = _token(request)
+        cron = svc.settings.cron_secret
+        if not (cron and tok and secrets.compare_digest(tok, cron)):
+            admin(caller(request))
+        return await svc.run_batches(force=force)
 
     @app.get("/v1/metrics/summary")
     async def metrics_summary(c: CallerDep, days: float = Query(30, ge=0), team: str | None = None):

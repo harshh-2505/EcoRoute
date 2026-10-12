@@ -61,6 +61,8 @@ class Settings:
     cascade: bool = False         # check each answer; re-ask a stronger model if it clearly failed
     shadow_rate: float = 0.0      # share of live requests also sent to the baseline and graded by a judge
     judge_model: str | None = None  # catalog id of the judge (default: the baseline model)
+    concise: bool = False         # default for the per-request "concise" constraint
+    cron_secret: str | None = None  # lets a scheduler (e.g. Vercel Cron) call /v1/batch/run
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -86,6 +88,8 @@ class Settings:
             cascade=_bool("ECOROUTE_CASCADE", False),
             shadow_rate=min(1.0, max(0.0, _float("ECOROUTE_SHADOW_RATE", 0.0))),
             judge_model=os.getenv("ECOROUTE_JUDGE_MODEL") or None,
+            concise=_bool("ECOROUTE_CONCISE", False),
+            cron_secret=os.getenv("CRON_SECRET") or None,
             api_keys={
                 "openai": os.getenv("OPENAI_API_KEY") or None,
                 "anthropic": os.getenv("ANTHROPIC_API_KEY") or None,

@@ -27,7 +27,9 @@ On the bundled 66-prompt benchmark (simulate mode, estimates), routing cuts ener
 | **Policies** | `eco`, `balanced`, `quality`, `cost` — weighted ranking of sustainability, cost, quality and latency. |
 | **Local models** | Ollama models are routed to when available; `require_local` keeps data on-device. |
 | **Carbon-aware** | Optional live grid carbon intensity from Electricity Maps. |
-| **Cost & efficiency management** | Per-request cost/energy caps, monthly spend & energy budgets that automatically shift policy, response cache (cache hits cost ~0), fallback chain on provider errors. |
+| **Cost & efficiency management** | Per-request cost/energy caps, monthly spend & energy budgets that automatically shift policy, a response cache that also matches reworded questions (cache hits cost ~0), concise mode, fallback chain on provider errors. |
+| **Carbon-aware batches** | Queue non-urgent work with a deadline; it runs when the live grid is cleaner than usual, or at the deadline. |
+| **Sustainability reports** | Monthly report as JSON, CSV or a printable page (save as PDF): footprint with low–high ranges, savings, per model and per team, quality evidence and methodology. |
 | **Metrics** | SQLite ledger of every request: tokens, latency, Wh, gCO₂e, mL water, $, baseline counterfactual, sustainability score; summaries, time series and everyday equivalents. |
 | **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in, with streaming and tool calling), CLI. |
 | **Quality safeguards** | Shadow evaluations grade routed answers against the baseline with a blind LLM judge; cascade mode re-asks a stronger model when an answer clearly fails; 👍/👎 feedback re-asks on demand and steers future routing away from models users dislike. |
@@ -105,6 +107,40 @@ The endpoint supports what real apps send:
   are routed only to tool-capable models of tier 2 or above, and are never cached.
 * `temperature`, `top_p`, `stop`; multi-part `content` arrays (text parts are used).
 
+### Sustainability reports
+
+`GET /v1/report?month=2026-10&format=html` gives a printable monthly report (the page has a Save as PDF
+button); `format=csv` gives one row per model plus a total, and `format=json` the raw numbers. Every
+figure comes with a low–high range from the uncertainty of its estimation method (×/÷1.5 for measured
+device power, ×/÷1.6 for compute-based estimates, ×/÷2.5 for price-based estimates of closed models).
+Add `team=` for one team's report; a team key always gets its own.
+
+### Carbon-aware batches
+
+```bash
+curl -X POST localhost:8000/v1/batch -H 'content-type: application/json' -d '{
+  "deadline_hours": 12,
+  "requests": [{"custom_id": "doc-1", "prompt": "Summarise this report: …"},
+               {"custom_id": "doc-2", "prompt": "Tag these tickets: …"}]}'
+# → {"id": "batch_…", "status": "queued", …}       GET /v1/batch/{id} for status and answers
+```
+
+Batch items run when live grid data (`ELECTRICITYMAPS_API_KEY`) shows the serving region at or below
+85% of its average carbon intensity (or `max_carbon_g_per_kwh`), and in any case within the hour
+before the deadline. Something has to call `GET /v1/batch-run` regularly: a cron job, or Vercel Cron
+with `CRON_SECRET` set (EcoRoute accepts `Authorization: Bearer $CRON_SECRET`). `?force=true` runs
+everything now.
+
+### Concise mode and the smarter cache
+
+`"concise": true` in `constraints` (or `ECOROUTE_CONCISE=true`) asks the model to answer briefly and
+caps output at 1.2× the tier's expected length. Output tokens are most of the energy of a call.
+
+The cache matches the same question asked in different words: case, punctuation, articles, contractions
+and polite filler are ignored, so "What's the capital of France?" and "please tell me what is the
+capital of france" share one entry. Prompts containing code or maths symbols only ignore case and
+spacing, because a single symbol can change their meaning.
+
 ### Quality safeguards
 
 Right-sizing only matters if answers stay good. EcoRoute gives you three ways to check and protect that:
@@ -153,6 +189,9 @@ configured, EcoRoute stays open, which suits local use and demos.
 | `GET` | `/v1/metrics/timeseries?days=7&bucket=hour` | Energy, carbon, water, cost over time |
 | `GET` | `/v1/metrics/requests` | Recent request log |
 | `GET/PUT` | `/v1/budget` | Monthly spend and energy budgets |
+| `GET` | `/v1/report?month=&format=json\|csv\|html` | Monthly sustainability report |
+| `POST` | `/v1/batch` · `GET /v1/batch/{id}` | Carbon-aware batch queue |
+| `GET/POST` | `/v1/batch-run` | Run due batch items (for a scheduler) |
 | `POST` | `/v1/feedback` | 👍/👎 on an answer, optionally re-asking a stronger model |
 | `GET` | `/v1/quality` | Shadow-evaluation parity, feedback and escalation stats |
 | `POST` | `/v1/quality/eval/{id}` | Grade one earlier live answer against the baseline |
@@ -221,6 +260,8 @@ rather than assuming it.
 | `OLLAMA_HOST` | `http://localhost:11434` | local models |
 | `ECOROUTE_API_KEYS` | — | `key:team` pairs; turns on authentication |
 | `ECOROUTE_ADMIN_KEY` | — | key for reset, budget changes and demo seeding |
+| `ECOROUTE_CONCISE` | `false` | concise mode by default |
+| `CRON_SECRET` | — | lets a scheduler call `/v1/batch-run` |
 | `ECOROUTE_CASCADE` | `false` | check answers and escalate clear failures |
 | `ECOROUTE_SHADOW_RATE` | `0` | share of live requests graded against the baseline (costs extra calls) |
 | `ECOROUTE_JUDGE_MODEL` | baseline | catalog id of the judge model |
@@ -272,8 +313,8 @@ tests/
 ## Roadmap
 
 * Learned complexity classifier (fine-tuned small encoder) trained on a larger labelled set
-* Time-shifting of non-urgent batch jobs to low-carbon hours of the grid
-* Semantic (embedding) cache for near-duplicate prompts
+* Embedding-based cache for paraphrases the text normaliser can't catch
+* Routing the same model to its cleanest serving region (needs multi-region endpoints)
 * Measured energy from hardware counters for local and self-hosted models
 
 ## License
