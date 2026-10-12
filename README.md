@@ -30,6 +30,7 @@ On the bundled 66-prompt benchmark (simulate mode, estimates), routing cuts ener
 | **Cost & efficiency management** | Per-request cost/energy caps, monthly spend & energy budgets that automatically shift policy, response cache (cache hits cost ~0), fallback chain on provider errors. |
 | **Metrics** | SQLite ledger of every request: tokens, latency, Wh, gCO₂e, mL water, $, baseline counterfactual, sustainability score; summaries, time series and everyday equivalents. |
 | **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in, with streaming and tool calling), CLI. |
+| **Quality safeguards** | Shadow evaluations grade routed answers against the baseline with a blind LLM judge; cascade mode re-asks a stronger model when an answer clearly fails; 👍/👎 feedback re-asks on demand and steers future routing away from models users dislike. |
 | **Teams & access** | Optional API keys mapped to teams; every request is attributed, and a team key only sees its own metrics. |
 | **Runs without keys** | Simulate mode exercises the full pipeline with no API keys — ideal for demos. |
 
@@ -104,6 +105,28 @@ The endpoint supports what real apps send:
   are routed only to tool-capable models of tier 2 or above, and are never cached.
 * `temperature`, `top_p`, `stop`; multi-part `content` arrays (text parts are used).
 
+### Quality safeguards
+
+Right-sizing only matters if answers stay good. EcoRoute gives you three ways to check and protect that:
+
+* **Shadow evaluations** (`ECOROUTE_SHADOW_RATE=0.05`): for a sample of live requests, the same
+  prompt also goes to the baseline model, and a judge model (`ECOROUTE_JUDGE_MODEL`, default the
+  baseline) grades both answers without knowing which is which. `GET /v1/quality` reports the share
+  of routed answers judged as good as or better than the baseline, by tier, plus the energy and cost
+  the evaluations themselves used (kept out of the savings figures). `POST /v1/quality/eval/{id}`
+  grades one earlier request on demand.
+* **Cascade** (`ECOROUTE_CASCADE=true`, or `"cascade": true` in `constraints`): each answer gets a
+  cheap check for clear failures (empty, cut off, refusal, far too short, no code for a coding task).
+  If it fails, the next stronger eligible model answers instead. Both attempts stay on the ledger, so
+  the extra energy is counted. Not applied to streamed or simulated answers.
+* **Feedback** (`POST /v1/feedback {"request_id": 12, "rating": "down", "escalate": true}`): a 👎
+  with `escalate` re-asks a stronger model (one tier up, excluding the first model) and returns its
+  answer. After three or more votes, a model's thumbs-down rate lowers its quality score in routing,
+  and the decision says so.
+
+Full prompts and answers are kept for 7 days (only when `ECOROUTE_STORE_PROMPTS` is on) so that
+feedback and evaluations can use them.
+
 ### Access keys and teams
 
 ```bash
@@ -130,6 +153,9 @@ configured, EcoRoute stays open, which suits local use and demos.
 | `GET` | `/v1/metrics/timeseries?days=7&bucket=hour` | Energy, carbon, water, cost over time |
 | `GET` | `/v1/metrics/requests` | Recent request log |
 | `GET/PUT` | `/v1/budget` | Monthly spend and energy budgets |
+| `POST` | `/v1/feedback` | 👍/👎 on an answer, optionally re-asking a stronger model |
+| `GET` | `/v1/quality` | Shadow-evaluation parity, feedback and escalation stats |
+| `POST` | `/v1/quality/eval/{id}` | Grade one earlier live answer against the baseline |
 | `POST` | `/v1/demo/seed` | Fill the dashboard with demo traffic (simulate mode only) |
 
 Interactive docs at `/docs`. Request options for `/v1/route` and `/v1/chat`:
@@ -195,6 +221,9 @@ rather than assuming it.
 | `OLLAMA_HOST` | `http://localhost:11434` | local models |
 | `ECOROUTE_API_KEYS` | — | `key:team` pairs; turns on authentication |
 | `ECOROUTE_ADMIN_KEY` | — | key for reset, budget changes and demo seeding |
+| `ECOROUTE_CASCADE` | `false` | check answers and escalate clear failures |
+| `ECOROUTE_SHADOW_RATE` | `0` | share of live requests graded against the baseline (costs extra calls) |
+| `ECOROUTE_JUDGE_MODEL` | baseline | catalog id of the judge model |
 
 Model prices in `ecoroute/data/catalog.yaml` are a snapshot — check providers' pricing pages and
 update them (and add new models) before relying on cost figures.
@@ -243,7 +272,6 @@ tests/
 ## Roadmap
 
 * Learned complexity classifier (fine-tuned small encoder) trained on a larger labelled set
-* Cascade mode: answer with a small model, escalate only if a verifier is unsure
 * Time-shifting of non-urgent batch jobs to low-carbon hours of the grid
 * Semantic (embedding) cache for near-duplicate prompts
 * Measured energy from hardware counters for local and self-hosted models

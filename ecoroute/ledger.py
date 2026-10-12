@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS requests (
     baseline_energy_wh REAL, baseline_carbon_g REAL, baseline_water_ml REAL, baseline_cost_usd REAL,
     sustainability_score REAL,
     fallback_used INTEGER DEFAULT 0,
-    team TEXT
+    team TEXT,
+    feedback INTEGER,              -- +1 thumbs up, -1 thumbs down
+    feedback_comment TEXT,
+    escalated INTEGER DEFAULT 0,   -- 1 = this answer replaced a weaker model's failed attempt
+    check_ok INTEGER               -- answer check result when cascade is on (1 ok, 0 failed)
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS cache (
@@ -29,9 +33,17 @@ CREATE TABLE IF NOT EXISTS cache (
     input_tokens INTEGER, output_tokens INTEGER, hits INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS payloads (request_id INTEGER PRIMARY KEY, created REAL, messages TEXT, response TEXT);
+CREATE TABLE IF NOT EXISTS evals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, request_id INTEGER, tier INTEGER, task_type TEXT,
+    model_id TEXT, baseline_model TEXT, judge_model TEXT,
+    score_routed REAL, score_baseline REAL, verdict TEXT, reason TEXT,
+    overhead_energy_wh REAL, overhead_cost_usd REAL
+);
 """
 # Columns added after the first release; older databases are migrated on open.
-MIGRATIONS = {"requests": {"team": "TEXT"}}
+MIGRATIONS = {"requests": {"team": "TEXT", "feedback": "INTEGER", "feedback_comment": "TEXT",
+                            "escalated": "INTEGER DEFAULT 0", "check_ok": "INTEGER"}}
 
 
 def cache_key(messages: list[dict], tier_floor: int | None = None) -> str:
@@ -80,6 +92,12 @@ class Ledger:
             self._conn.commit()
             return cur.lastrowid
 
+    def update(self, request_id: int, **fields) -> None:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE requests SET {sets} WHERE id = ?", (*fields.values(), request_id))
+            self._conn.commit()
+
     def set_ts(self, request_id: int, ts: float) -> None:
         with self._lock:
             self._conn.execute("UPDATE requests SET ts = ? WHERE id = ?", (ts, request_id))
@@ -92,9 +110,82 @@ class Ledger:
                                       (*args, limit)).fetchall()
         return [dict(r) for r in rows]
 
+    def get(self, request_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
+        return dict(r) if r else None
+
+    def set_feedback(self, request_id: int, rating: int, comment: str | None = None) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE requests SET feedback = ?, feedback_comment = ? WHERE id = ?",
+                               (rating, comment, request_id))
+            self._conn.commit()
+
+    def feedback_stats(self, since: float) -> dict[str, dict]:
+        """Per-model thumbs up/down counts, used to nudge routing away from models users dislike."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT model_id, SUM(feedback = 1) up, SUM(feedback = -1) down FROM requests
+                   WHERE ts >= ? AND feedback IS NOT NULL GROUP BY model_id""", (since,)).fetchall()
+        return {r["model_id"]: {"up": r["up"] or 0, "down": r["down"] or 0} for r in rows}
+
+    # ----------------------------- payloads -----------------------------
+    def payload_put(self, request_id: int, messages: list[dict], response: str, keep_s: float) -> None:
+        """Keep the full prompt and answer for a while, so feedback can re-ask and evals can grade them."""
+        with self._lock:
+            self._conn.execute("DELETE FROM payloads WHERE created < ?", (time.time() - keep_s,))
+            self._conn.execute("INSERT OR REPLACE INTO payloads VALUES (?, ?, ?, ?)",
+                               (request_id, time.time(), json.dumps(messages), response))
+            self._conn.commit()
+
+    def payload_get(self, request_id: int) -> list[dict] | None:
+        p = self.payload(request_id)
+        return p["messages"] if p else None
+
+    def payload(self, request_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT messages, response FROM payloads WHERE request_id = ?",
+                                   (request_id,)).fetchone()
+        return {"messages": json.loads(r["messages"]), "response": r["response"]} if r else None
+
+    # ------------------------------ evals -------------------------------
+    def eval_put(self, row: dict) -> int:
+        cols = ", ".join(row)
+        with self._lock:
+            cur = self._conn.execute(f"INSERT INTO evals ({cols}) VALUES ({', '.join('?' for _ in row)})",
+                                     list(row.values()))
+            self._conn.commit()
+            return cur.lastrowid
+
+    def quality(self, since: float = 0.0) -> dict:
+        with self._lock:
+            ev = dict(self._conn.execute(
+                """SELECT COUNT(*) n, COALESCE(SUM(verdict = 'routed_better'), 0) routed_better,
+                          COALESCE(SUM(verdict = 'equal'), 0) equal, COALESCE(SUM(verdict = 'baseline_better'), 0) baseline_better,
+                          AVG(score_routed) avg_routed, AVG(score_baseline) avg_baseline,
+                          COALESCE(SUM(overhead_energy_wh), 0) overhead_energy_wh,
+                          COALESCE(SUM(overhead_cost_usd), 0) overhead_cost_usd
+                   FROM evals WHERE ts >= ?""", (since,)).fetchone())
+            ev_tier = [dict(x) for x in self._conn.execute(
+                """SELECT tier, COUNT(*) n, SUM(verdict != 'baseline_better') at_parity FROM evals
+                   WHERE ts >= ? GROUP BY tier ORDER BY tier""", (since,))]
+            recent = [dict(x) for x in self._conn.execute(
+                "SELECT * FROM evals WHERE ts >= ? ORDER BY id DESC LIMIT 20", (since,))]
+            fb = dict(self._conn.execute(
+                """SELECT COALESCE(SUM(feedback = 1), 0) up, COALESCE(SUM(feedback = -1), 0) down,
+                          COALESCE(SUM(escalated), 0) escalated, COALESCE(SUM(check_ok = 0), 0) checks_failed,
+                          COALESCE(SUM(check_ok IS NOT NULL), 0) checks_run
+                   FROM requests WHERE ts >= ?""", (since,)).fetchone())
+        ev["parity_rate"] = (ev["routed_better"] + ev["equal"]) / ev["n"] if ev["n"] else None
+        rated = fb["up"] + fb["down"]
+        fb["satisfaction"] = fb["up"] / rated if rated else None
+        return {"evals": ev, "evals_by_tier": ev_tier, "recent_evals": recent, "feedback": fb}
+
     def clear(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM requests")
+            self._conn.execute("DELETE FROM payloads")
+            self._conn.execute("DELETE FROM evals")
             self._conn.execute("DELETE FROM cache")
             self._conn.commit()
 

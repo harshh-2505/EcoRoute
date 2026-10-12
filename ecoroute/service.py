@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from .config import Settings
 from .impact import Impact, ImpactEstimator, equivalents, sustainability_score
 from .ledger import Ledger, cache_key, month_start_ts
 from .providers import Provider, ProviderError, ProviderResult, SimulatedProvider, build_providers
+from .quality import check_answer, judge_prompt, parse_verdict
 from .router import Constraints, Decision, Router
 
 log = logging.getLogger("ecoroute")
@@ -143,7 +145,17 @@ class EcoRouteService:
         k = Constraints.from_dict(constraints)
         if (options or {}).get("tools"):
             k.needs_tools = True
-        return self.router.route(cx, available, policy or self.settings.default_policy, k, self.budget_status())
+        return self.router.route(cx, available, policy or self.settings.default_policy, k, self.budget_status(),
+                                 self.feedback_penalties())
+
+    def feedback_penalties(self, days: float = 30) -> dict[str, float]:
+        """Quality points to subtract per model from recent thumbs-down votes (needs ≥3 votes; full weight at 10)."""
+        out = {}
+        for model_id, f in self.ledger.feedback_stats(time.time() - days * 86400).items():
+            n = f["up"] + f["down"]
+            if n >= 3 and f["down"]:
+                out[model_id] = round(30 * f["down"] / n * min(1.0, n / 10), 2)
+        return out
 
     def _cached(self, msgs, decision, use_cache, options) -> tuple[str, dict | None]:
         """Cache key and hit (if any). Requests with tools are never cached: tool results change."""
@@ -204,7 +216,11 @@ class EcoRouteService:
                 errors.append(f"{model_id}: {e}")
                 log.warning("provider failed, falling back: %s", e)
                 continue
-            return self._measure(decision, model_id, res, msgs, key, use_cache, options, i > 0, errors, team)
+            out = self._measure(decision, model_id, res, msgs, key, use_cache, options, i > 0, errors, team)
+            k = Constraints.from_dict(constraints)
+            if (self.settings.cascade if k.cascade is None else k.cascade) and not res.simulated:
+                out = await self._cascade(out, res, msgs, mode, max_tokens, options, team)
+            return out
         raise RuntimeError("All candidate models failed: " + "; ".join(errors))
 
     async def stream_chat(self, prompt: str | None = None, messages: list[dict] | None = None,
@@ -251,6 +267,112 @@ class EcoRouteService:
                     return
         yield {"type": "error", "message": "All candidate models failed: " + "; ".join(errors)}
 
+    async def _cascade(self, out: ChatOutcome, res: ProviderResult, msgs, mode, max_tokens, options, team) -> ChatOutcome:
+        """Check the answer; if it clearly failed, ask the next stronger eligible model once."""
+        decision = out.decision
+        check = check_answer(decision.complexity, res.text, res.finish_reason, res.tool_calls)
+        self.ledger.update(out.request_id, check_ok=int(check["ok"]))
+        out.extra["quality_check"] = check
+        if check["ok"]:
+            return out
+        current = self.catalog.get(out.model_id)
+        stronger = [c for c in decision.candidates if c.eligible and c.model_id != out.model_id
+                    and (c.quality > current.quality or c.max_tier > current.max_tier)]
+        if not stronger:
+            return out
+        target = max(stronger, key=lambda c: c.total)
+        try:
+            provider, budget = self._target(target.model_id, decision.complexity, max_tokens, mode)
+            res2 = await provider.complete(self.catalog.get(target.model_id), msgs, budget, options)
+        except (ProviderError, httpx.HTTPError, KeyError, IndexError) as e:
+            out.errors.append(f"escalation to {target.model_id} failed: {e}")
+            return out
+        key = cache_key(msgs, decision.required_tier)
+        out2 = self._measure(decision, target.model_id, res2, msgs, key, True, options, False, out.errors, team)
+        check2 = check_answer(decision.complexity, res2.text, res2.finish_reason, res2.tool_calls)
+        self.ledger.update(out2.request_id, escalated=1, check_ok=int(check2["ok"]))
+        out2.extra["quality_check"] = check2
+        out2.extra["escalation"] = {"from": out.model_id, "to": target.model_id, "issues": check["issues"],
+                                    "first_request_id": out.request_id,
+                                    "extra_energy_wh": out.impact["energy_wh"], "extra_cost_usd": out.impact["cost_usd"]}
+        return out2
+
+    async def feedback(self, request_id: int, rating: int, comment: str | None = None,
+                       escalate: bool = False) -> dict:
+        """Record 👍/👎 on a request. With ``escalate`` on a 👎, re-ask a stronger model and return its answer."""
+        row = self.ledger.get(request_id)
+        if not row:
+            raise LookupError(f"No request {request_id}")
+        self.ledger.set_feedback(request_id, rating, (comment or "")[:500] or None)
+        result: dict = {"request_id": request_id, "rating": rating}
+        if escalate and rating < 0:
+            msgs = self.ledger.payload_get(request_id)
+            if not msgs:
+                raise ValueError("The prompt for this request wasn't stored, so it can't be re-asked "
+                                 "(ECOROUTE_STORE_PROMPTS is off or it expired).")
+            out = await self.chat(messages=msgs, policy=row["policy"], use_cache=False, team=row["team"],
+                                  constraints={"min_tier": min(5, (row["tier"] or 1) + 1),
+                                               "exclude_models": [row["model_id"]], "cascade": False})
+            self.ledger.update(out.request_id, escalated=1)
+            result["escalated"] = out.to_dict()
+        return result
+
+    # ------------------------------------------------------------------ shadow evaluation
+    def wants_shadow(self, out: ChatOutcome) -> bool:
+        return (out.source == "live" and not out.tool_calls and self.settings.shadow_rate > 0
+                and out.model_id != out.decision.baseline_model and random.random() < self.settings.shadow_rate)
+
+    async def shadow_eval(self, out: ChatOutcome, messages: list[dict]) -> dict | None:
+        """Send the same request to the baseline model, then have a judge grade both answers blind.
+
+        Returns the stored evaluation, or ``None`` if the baseline or judge couldn't be reached.
+        The extra calls are real energy; they are logged as evaluation overhead, not as routed traffic.
+        """
+        msgs = self._normalise(None, messages)
+        decision = out.decision
+        base = self.catalog.get(decision.baseline_model)
+        judge = self.catalog.get(self.settings.judge_model) if self.settings.judge_model and \
+            self.catalog.has(self.settings.judge_model) else base
+        available, mode = await self.availability()
+        if mode != "live" or base.id not in available or judge.id not in available:
+            return None
+        try:
+            bp, budget = self._target(base.id, decision.complexity, None, mode)
+            b = await bp.complete(base, msgs, budget)
+            swap = random.random() < 0.5  # hide which answer is the baseline from the judge
+            a_text, b_text = (b.text, out.text) if swap else (out.text, b.text)
+            jp, _ = self._target(judge.id, decision.complexity, None, mode)
+            j = await jp.complete(judge, judge_prompt(last_prompt(msgs), a_text, b_text), 400)
+        except (ProviderError, httpx.HTTPError, KeyError, IndexError) as e:
+            log.warning("shadow eval failed: %s", e)
+            return None
+        v = parse_verdict(j.text)
+        if not v:
+            return None
+        if swap:
+            v["score_routed"], v["score_baseline"] = v["score_baseline"], v["score_routed"]
+            v["verdict"] = {"routed_better": "baseline_better", "baseline_better": "routed_better"}.get(v["verdict"], "equal")
+        overhead = [self.estimator.estimate(base, b.input_tokens, b.output_tokens),
+                    self.estimator.estimate(judge, j.input_tokens, j.output_tokens)]
+        row = {"ts": time.time(), "request_id": out.request_id, "tier": decision.complexity["tier"],
+               "task_type": decision.complexity["task_type"], "model_id": out.model_id, "baseline_model": base.id,
+               "judge_model": judge.id, **v,
+               "overhead_energy_wh": sum(x.energy_wh for x in overhead),
+               "overhead_cost_usd": sum(x.cost_usd for x in overhead)}
+        row["id"] = self.ledger.eval_put(row)
+        return row
+
+    async def eval_request(self, request_id: int) -> dict | None:
+        """Run a shadow evaluation for an earlier live request, on demand."""
+        row, p = self.ledger.get(request_id), self.ledger.payload(request_id)
+        if not row or not p:
+            raise LookupError(f"Request {request_id} or its stored prompt was not found")
+        if row["source"] != "live":
+            raise ValueError("Only live answers can be evaluated; simulated and cached answers are skipped.")
+        decision = await self.decide(messages=p["messages"], policy=row["policy"])
+        out = ChatOutcome(decision, row["model_id"], p["response"], "live", {}, {}, {}, 0.0, False, request_id, [])
+        return await self.shadow_eval(out, p["messages"])
+
     def _finish(self, decision, model_id, res: ProviderResult, source, imp, base, fallback, errors, msgs, team):
         model = self.catalog.get(model_id)
         savings = {k: base[k] - imp[k] for k in ("energy_wh", "carbon_g", "water_ml", "cost_usd")}
@@ -270,6 +392,8 @@ class EcoRouteService:
             "baseline_water_ml": base["water_ml"], "baseline_cost_usd": base["cost_usd"],
             "sustainability_score": sust, "fallback_used": int(fallback), "team": team,
         })
+        if self.settings.store_prompts and rid:
+            self.ledger.payload_put(rid, msgs, res.text, 7 * 86400)
         return ChatOutcome(decision, model_id, res.text, source, imp, base, savings, res.latency_ms, fallback, rid,
                            errors, res.tool_calls, res.finish_reason, team)
 
