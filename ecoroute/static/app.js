@@ -31,12 +31,21 @@ async function api(path, opts = {}, retried = false) {
   return body;
 }
 
+async function apiBlob(path) {
+  const headers = storedKey() ? { Authorization: `Bearer ${storedKey()}` } : {};
+  const r = await fetch(path, { headers });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.blob();
+}
+
 /* ---------------- tabs & segmented controls ---------------- */
 $$(".tab").forEach((t) => t.addEventListener("click", () => {
   $$(".tab").forEach((x) => x.classList.toggle("active", x === t));
   $$(".panel").forEach((p) => p.classList.toggle("active", p.id === t.dataset.tab));
   if (t.dataset.tab === "impact") loadImpact();
   if (t.dataset.tab === "models") loadModels();
+  if (t.dataset.tab === "quality") loadQuality();
+  if (t.dataset.tab === "embed") loadEmbed();
 }));
 function seg(id, onChange) {
   const el = $(id);
@@ -49,6 +58,7 @@ function seg(id, onChange) {
 }
 const policy = seg("#policy");
 const range = seg("#range", () => loadImpact());
+const qRange = seg("#qRange", () => loadQuality());
 
 /* ---------------- status ---------------- */
 async function loadStatus() {
@@ -74,6 +84,8 @@ $("#examples").addEventListener("click", (e) => { const b = e.target.closest("bu
 function payload() {
   const c = {};
   if ($("#localOnly").checked) c.require_local = true;
+  if ($("#concise").checked) c.concise = true;
+  if ($("#cascade").checked) c.cascade = true;
   return { prompt: $("#prompt").value.trim(), policy: policy(), constraints: c, use_cache: $("#useCache").checked };
 }
 
@@ -129,13 +141,47 @@ function renderDecision(d, out) {
   $("#responseCard").classList.toggle("hidden", !out);
   if (out) {
     $("#rSource").textContent = out.source + (out.latency_ms ? ` · ${Math.round(out.latency_ms)} ms` : "");
-    $("#rText").textContent = out.response;
+    $("#rText").textContent = out.response || (out.tool_calls ? JSON.stringify(out.tool_calls, null, 2) : "");
+    renderNotes(out);
+    lastOut = out;
+    EcoReceipt.render("#rReceipt", out, { theme: "dark" });
+    $$("#rFeedback .btn").forEach((b) => { b.disabled = false; b.classList.remove("picked"); });
+    $("#rFbDone").textContent = "";
+    $("#rFeedback").classList.toggle("hidden", !out.request_id);
   }
 
   lastDecision = { d, modelId };
   renderCands();
   $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+let lastOut = null;
+function renderNotes(out) {
+  const n = [];
+  if (out.escalation) n.push(`<div class="note"><b>Escalated</b> from ${esc(out.escalation.from)}: ${esc(out.escalation.issues.join(", "))}. The first attempt's ${fmt.wh(out.escalation.extra_energy_wh)} is still counted.</div>`);
+  else if (out.quality_check && out.quality_check.ok) n.push(`<div class="note ok"><b>Answer check passed.</b> No sign the model struggled.</div>`);
+  else if (out.quality_check) n.push(`<div class="note"><b>Answer check:</b> ${esc(out.quality_check.issues.join(", "))}. No stronger model was available.</div>`);
+  if (out.concise) n.push(`<div class="note ok"><b>Concise mode.</b> Asked for a brief answer and capped output tokens.</div>`);
+  $("#rNotes").innerHTML = n.join("");
+}
+
+$("#rFeedback").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b || !lastOut) return;
+  const escalate = b.dataset.r === "escalate";
+  $$("#rFeedback .btn").forEach((x) => (x.disabled = true));
+  b.classList.add("picked");
+  try {
+    const r = await api("/v1/feedback", { method: "POST", body: JSON.stringify({
+      request_id: lastOut.request_id, rating: b.dataset.r === "up" ? "up" : "down", escalate }) });
+    if (r.escalated) {
+      const prev = lastOut.model_id;
+      renderDecision(r.escalated.decision, r.escalated);
+      $("#rNotes").insertAdjacentHTML("afterbegin", `<div class="note"><b>Re-asked</b> after your ▼ on ${esc(prev)}. Future routing will weigh that vote.</div>`);
+    } else {
+      $("#rFbDone").textContent = b.dataset.r === "up" ? "Thanks. Logged." : "Logged. Down-votes steer future routing away from this model.";
+    }
+  } catch (err) { $("#rFbDone").textContent = err.message; $$("#rFeedback .btn").forEach((x) => (x.disabled = false)); }
+});
 
 // With dozens of models the full ranking is long: show the top rows, expandable to all.
 const CAND_ROWS = 10;
@@ -242,6 +288,15 @@ async function loadImpact() {
   setBar("#budUsdBar", "#budUsdTxt", b.cost_ratio, b.spent_usd, b.monthly_budget_usd, fmt.usd);
   setBar("#budWhBar", "#budWhTxt", b.energy_ratio, b.used_wh, b.monthly_energy_budget_wh, fmt.wh);
 
+  const teams = s.by_team || [];
+  $("#teamCard").classList.toggle("hidden", !teams.length || (teams.length === 1 && teams[0].team === "unassigned"));
+  $("#teams").innerHTML = `<thead><tr><th>Team</th><th>Requests</th><th>Energy</th><th>Saved vs baseline</th><th>CO₂e</th><th>Spend</th></tr></thead><tbody>` +
+    teams.map((r) => {
+      const sv = r.baseline_energy_wh ? (100 * (r.baseline_energy_wh - r.energy_wh)) / r.baseline_energy_wh : 0;
+      return `<tr><td>${esc(r.team)}</td><td class="num">${fmt.n(r.n)}</td><td class="num">${fmt.wh(r.energy_wh || 0)}</td>
+        <td class="num">${sv.toFixed(0)}%</td><td class="num">${fmt.g(r.carbon_g || 0)}</td><td class="num">${fmt.usd(r.cost_usd || 0)}</td></tr>`;
+    }).join("") + "</tbody>";
+
   $("#recent").innerHTML = recent.length ? `<thead><tr><th>When</th><th>Prompt</th><th>Tier</th><th>Policy</th><th>Model</th><th>Source</th><th>Energy</th><th>Saved</th><th>Cost</th></tr></thead><tbody>` +
     recent.map((r) => {
       const sv = r.baseline_energy_wh ? (100 * (r.baseline_energy_wh - r.energy_wh)) / r.baseline_energy_wh : 0;
@@ -250,6 +305,20 @@ async function loadImpact() {
       <td class="num">${fmt.wh(r.energy_wh)}</td><td class="num">${sv.toFixed(0)}%</td><td class="num">${fmt.usd(r.cost_usd)}</td></tr>`;
     }).join("") + "</tbody>" : `<tr><td class="empty">Nothing logged yet.</td></tr>`;
 }
+
+async function openReport(format) {
+  try {
+    const blob = await apiBlob(`/v1/report?format=${format}`);
+    const url = URL.createObjectURL(blob);
+    if (format === "csv") {
+      const a = Object.assign(document.createElement("a"), { href: url, download: `ecoroute-report-${new Date().toISOString().slice(0, 7)}.csv` });
+      document.body.appendChild(a); a.click(); a.remove();
+    } else window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (err) { alert(err.message); }
+}
+$("#btnReport").addEventListener("click", () => openReport("html"));
+$("#btnCsv").addEventListener("click", () => openReport("csv"));
 
 $("#btnSeed").addEventListener("click", async (e) => {
   e.target.disabled = true;
@@ -265,6 +334,56 @@ $("#btnBudget").addEventListener("click", async () => {
     monthly_budget_usd: Number($("#budUsd").value || 0), monthly_energy_budget_wh: Number($("#budWh").value || 0) }) });
   loadImpact();
 });
+
+/* ---------------- quality ---------------- */
+async function loadQuality() {
+  const days = Number(qRange());
+  const q = await api(`/v1/quality?days=${days}`);
+  const ev = q.evals, fb = q.feedback;
+  const k = (label, v, sub) => `<div class="kpi"><div class="k">${label}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
+  const pctOr = (x, alt) => (x == null ? alt : `${(x * 100).toFixed(0)}%`);
+  $("#qKpis").innerHTML = [
+    k("At parity with baseline", pctOr(ev.parity_rate, "—"), ev.n ? `${fmt.n(ev.n)} answers graded blind` : "no graded answers yet"),
+    k("Avg judge score", ev.n ? `${ev.avg_routed.toFixed(1)} / ${ev.avg_baseline.toFixed(1)}` : "—", "routed / baseline, out of 10"),
+    k("User satisfaction", pctOr(fb.satisfaction, "—"), `${fmt.n(fb.up)} ▲ · ${fmt.n(fb.down)} ▼`),
+    k("Escalations", fmt.n(fb.escalated), fb.checks_run ? `${fmt.n(fb.checks_failed)} of ${fmt.n(fb.checks_run)} checks failed` : "cascade checks off"),
+  ].join("");
+  $("#qConfig").innerHTML = `shadow rate <b>${(q.shadow_rate * 100).toFixed(0)}%</b> · judge <b>${esc(q.judge_model)}</b> · cascade <b>${q.cascade ? "on" : "per request"}</b>` +
+    (ev.n ? ` · eval overhead ${fmt.wh(ev.overhead_energy_wh)}, ${fmt.usd(ev.overhead_cost_usd)}` : "");
+  const tiers = ["trivial", "simple", "moderate", "complex", "expert"];
+  $("#qTiers").innerHTML = q.evals_by_tier.length ? q.evals_by_tier.map((t) => {
+    const p = t.n ? (100 * t.at_parity) / t.n : 0;
+    return `<div class="row"><span>${t.tier} ${tiers[t.tier - 1]}</span><span class="track"><i style="width:${p}%"></i><i class="lose" style="width:${100 - p}%"></i></span><b>${p.toFixed(0)}% of ${t.n}</b></div>`;
+  }).join("") : `<span class="empty">No shadow evaluations yet. They run on live traffic only, since simulated answers aren't real model output.</span>`;
+  const pen = Object.entries(q.feedback_penalties || {});
+  $("#qPenalties").innerHTML = pen.length ? `Feedback is currently lowering: ${pen.map(([m, v]) => `<b>${esc(m)}</b> −${v.toFixed(1)}`).join(" · ")}` : "";
+  $("#qEvals").innerHTML = q.recent_evals.length ? `<thead><tr><th>When</th><th>Tier</th><th>Routed model</th><th>Score</th><th>Baseline</th><th>Verdict</th><th>Judge's reason</th></tr></thead><tbody>` +
+    q.recent_evals.map((r) => `<tr><td>${new Date(r.ts * 1000).toLocaleString()}</td><td class="num">${r.tier}</td><td>${esc(r.model_id)}</td>
+      <td class="num">${r.score_routed}</td><td class="num">${r.score_baseline}</td><td><span class="verdict ${esc(r.verdict)}">${esc(r.verdict.replace("_", " "))}</span></td>
+      <td title="${esc(r.reason)}">${esc((r.reason || "").slice(0, 70))}</td></tr>`).join("") + "</tbody>"
+    : `<tr><td class="empty">Nothing graded yet.</td></tr>`;
+}
+
+/* ---------------- embed ---------------- */
+const SAMPLE = { model: "groq-llama-3.1-8b", ecoroute: { source: "live", baseline_model: "openai-gpt-5",
+  impact: { energy_wh: 0.0124, carbon_g: 0.0046, water_ml: 0.041, cost_usd: 0.00002 }, savings: { energy_pct: 91 } } };
+function loadEmbed() {
+  const origin = location.origin;
+  $("#embedCode").innerHTML = [
+    `<span class="c">&lt;!-- 1. load the script --&gt;</span>`,
+    `&lt;script src=<span class="s">"${esc(origin)}/static/receipt.js"</span>&gt;&lt;/script&gt;`,
+    ``, `<span class="c">&lt;!-- 2. a place for the receipt --&gt;</span>`,
+    `&lt;div id=<span class="s">"receipt"</span>&gt;&lt;/div&gt;`,
+    ``, `<span class="c">&lt;!-- 3. render it from any EcoRoute response --&gt;</span>`,
+    `&lt;script&gt;`,
+    `  <span class="k">const</span> r = <span class="k">await</span> client.chat.completions.create({ model: <span class="s">"ecoroute/eco"</span>, messages });`,
+    `  EcoReceipt.render(<span class="s">"#receipt"</span>, r);`,
+    `&lt;/script&gt;`,
+  ].join("\n");
+  const src = lastOut || SAMPLE;
+  EcoReceipt.render("#embedReceipt", src, { theme: "dark" });
+  EcoReceipt.render("#embedReceiptCompact", src, { theme: "dark", compact: true });
+}
 
 /* ---------------- models ---------------- */
 const PROVIDER_NAMES = { ollama: "local", openai: "OpenAI", anthropic: "Anthropic", gemini: "Gemini", groq: "Groq",
