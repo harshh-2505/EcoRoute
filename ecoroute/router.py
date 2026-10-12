@@ -35,6 +35,7 @@ class Constraints:
     min_tier: int | None = None              # force at least this tier
     force_model: str | None = None           # bypass routing
     needs_tools: bool = False                # request carries tool/function definitions
+    cascade: bool | None = None              # check the answer and escalate on failure (None = server default)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> Constraints:
@@ -91,8 +92,11 @@ class Router:
 
     # ------------------------------------------------------------------
     def route(self, cx: ComplexityResult, available: set[str], policy: str = "balanced",
-              constraints: Constraints | None = None, budget_status: dict | None = None) -> Decision:
+              constraints: Constraints | None = None, budget_status: dict | None = None,
+              penalties: dict[str, float] | None = None) -> Decision:
+        """``penalties``: quality points to subtract per model id (from user feedback)."""
         constraints = constraints or Constraints()
+        penalties = penalties or {}
         budget_status = budget_status or {}
         reasons: list[str] = []
         if policy not in POLICIES:
@@ -118,7 +122,7 @@ class Router:
         for m in self.catalog.models:
             imp = self.estimator.estimate(m, in_tok, out_tok)
             elig, why = self._eligible(m, required, available, constraints, imp)
-            cands.append(self._score(m, imp, weights, cx, required, elig, why, constraints))
+            cands.append(self._score(m, imp, weights, cx, required, elig, why, constraints, penalties.get(m.id, 0.0)))
 
         eligible = [c for c in cands if c.eligible]
         if constraints.force_model:
@@ -155,6 +159,9 @@ class Router:
 
         reasons.insert(0, f"Prompt judged tier {cx.tier} ({cx.tier_name}, {cx.task_type}); "
                           f"{len(eligible)} capable model(s) available.")
+        demoted = [c.display_name for c in eligible[:3] if c.scores.get("feedback_penalty")]
+        if demoted:
+            reasons.append("User feedback lowered the quality score of " + ", ".join(demoted) + ".")
         reasons.append(f"Picked {model.display_name} under '{effective_policy}' policy "
                        f"(score {chosen.total:.1f}, sustainability {chosen.scores['sustainability']:.0f}/100).")
         if savings["energy_pct"] > 0:
@@ -191,7 +198,7 @@ class Router:
         return True, ""
 
     def _score(self, m: ModelSpec, imp: Impact, weights: dict, cx: ComplexityResult, required: int,
-               eligible: bool, why: str, k: Constraints) -> Candidate:
+               eligible: bool, why: str, k: Constraints, penalty: float = 0.0) -> Candidate:
         sust = sustainability_score(imp)
         cost = cost_score(imp)
         # Quality matters more as prompts get harder. Over-provisioning (a tier-5 model for a
@@ -199,6 +206,7 @@ class Router:
         q_needed = 40 + 12 * required
         quality = 100 * min(1.0, m.quality / q_needed) if q_needed else 100
         quality = 0.7 * quality + 0.3 * m.quality  # keep some absolute preference
+        quality = max(0.0, quality - penalty)
         latency = max(0.0, min(100.0, 100 * (math.log10(max(m.tps, 1)) - 1) / 2))  # 10→0, 1000→100
 
         w = dict(weights)
@@ -212,7 +220,7 @@ class Router:
             model_id=m.id, display_name=m.display_name, provider=m.provider, kind=m.kind,
             quality=m.quality, max_tier=m.max_tier, estimated=imp.to_dict(),
             scores={"sustainability": sust, "cost": cost, "quality": round(quality, 2),
-                    "latency": round(latency, 2)},
+                    "latency": round(latency, 2), **({"feedback_penalty": round(penalty, 2)} if penalty else {})},
             total=round(total, 3), eligible=eligible, reason=why,
         )
 

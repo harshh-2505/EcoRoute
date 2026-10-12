@@ -58,6 +58,9 @@ class Settings:
     # Client access keys → team name. Empty = open access (fine for local use and demos).
     access_keys: dict[str, str | None] = field(default_factory=dict)
     admin_key: str | None = None  # required for reset/budget/seed when set
+    cascade: bool = False         # check each answer; re-ask a stronger model if it clearly failed
+    shadow_rate: float = 0.0      # share of live requests also sent to the baseline and graded by a judge
+    judge_model: str | None = None  # catalog id of the judge (default: the baseline model)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -80,6 +83,9 @@ class Settings:
             electricitymaps_api_key=os.getenv("ELECTRICITYMAPS_API_KEY") or None,
             access_keys=parse_access_keys(os.getenv("ECOROUTE_API_KEYS", "")),
             admin_key=os.getenv("ECOROUTE_ADMIN_KEY") or None,
+            cascade=_bool("ECOROUTE_CASCADE", False),
+            shadow_rate=min(1.0, max(0.0, _float("ECOROUTE_SHADOW_RATE", 0.0))),
+            judge_model=os.getenv("ECOROUTE_JUDGE_MODEL") or None,
             api_keys={
                 "openai": os.getenv("OPENAI_API_KEY") or None,
                 "anthropic": os.getenv("ANTHROPIC_API_KEY") or None,

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -49,6 +49,21 @@ class ChatRequest(RouteRequest):
 
 class AnalyzeRequest(BaseModel):
     prompt: str
+
+
+class FeedbackRequest(BaseModel):
+    request_id: int
+    rating: str | int = Field(..., description="up | down (or 1 / -1)")
+    comment: str | None = None
+    escalate: bool = Field(False, description="On 'down', re-ask a stronger model and return its answer")
+
+    def score(self) -> int:
+        r = str(self.rating).lower()
+        if r in ("up", "1", "+1", "good"):
+            return 1
+        if r in ("down", "-1", "bad"):
+            return -1
+        raise ValueError("rating must be 'up' or 'down'")
 
 
 class BudgetRequest(BaseModel):
@@ -166,11 +181,16 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
             _bad(e)
         return d.to_dict()
 
+    def maybe_shadow(out, messages, tasks: BackgroundTasks):
+        if svc.wants_shadow(out):
+            tasks.add_task(svc.shadow_eval, out, messages)
+
     @app.post("/v1/chat")
-    async def chat(req: ChatRequest, c: CallerDep):
+    async def chat(req: ChatRequest, c: CallerDep, tasks: BackgroundTasks):
         try:
             out = await svc.chat(req.prompt, _msgs(req), req.policy, req.constraints, req.use_cache, req.max_tokens,
                                  team=c.team)
+            maybe_shadow(out, _msgs(req) or [{"role": "user", "content": req.prompt}], tasks)
         except ValueError as e:
             _bad(e)
         except RuntimeError as e:
@@ -179,7 +199,7 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
 
     # Drop-in OpenAI-compatible endpoint: model = "ecoroute/<policy>" or a catalog id.
     @app.post("/v1/chat/completions")
-    async def openai_compat(req: OpenAIChatRequest, c: CallerDep):
+    async def openai_compat(req: OpenAIChatRequest, c: CallerDep, tasks: BackgroundTasks):
         policy, constraints = None, None
         name = req.model.removeprefix("ecoroute/")
         if name in POLICIES:
@@ -202,6 +222,7 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         try:
             out = await svc.chat(**kwargs)
+            maybe_shadow(out, kwargs["messages"], tasks)
         except ValueError as e:
             _bad(e)
         except RuntimeError as e:
@@ -215,6 +236,41 @@ def create_app(service: EcoRouteService | None = None) -> FastAPI:
             "choices": [{"index": 0, "finish_reason": out.finish_reason, "message": message}],
             "usage": _usage(out), "ecoroute": _eco(out),
         }
+
+    @app.post("/v1/feedback")
+    async def feedback(req: FeedbackRequest, c: CallerDep):
+        """Thumbs up/down on an answer. Down-votes steer future routing; ``escalate`` re-asks a stronger model."""
+        row = svc.ledger.get(req.request_id)
+        if not row or (c.scoped and row["team"] != c.team):
+            raise HTTPException(404, f"No request {req.request_id}")
+        try:
+            return await svc.feedback(req.request_id, req.score(), req.comment, req.escalate)
+        except ValueError as e:
+            _bad(e)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.get("/v1/quality", dependencies=[Depends(caller)])
+    async def quality(days: float = Query(30, ge=0)):
+        """Answer-quality evidence: shadow evaluations vs the baseline, user feedback, cascade escalations."""
+        since = time.time() - days * 86400 if days else 0
+        q = svc.ledger.quality(since)
+        return {**q, "baseline_model": svc.router.baseline_model, "shadow_rate": svc.settings.shadow_rate,
+                "cascade": svc.settings.cascade, "judge_model": svc.settings.judge_model or svc.router.baseline_model,
+                "feedback_penalties": svc.feedback_penalties()}
+
+    @app.post("/v1/quality/eval/{request_id}", dependencies=[Depends(admin)])
+    async def quality_eval(request_id: int):
+        """Grade one earlier live answer against the baseline model now (makes two extra model calls)."""
+        try:
+            row = await svc.eval_request(request_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            _bad(e)
+        if row is None:
+            raise HTTPException(409, "The baseline or judge model isn't reachable in this mode.")
+        return row
 
     @app.get("/v1/metrics/summary")
     async def metrics_summary(c: CallerDep, days: float = Query(30, ge=0), team: str | None = None):
