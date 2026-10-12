@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -12,7 +13,7 @@ from .complexity import analyze, estimate_tokens
 from .config import Settings
 from .impact import Impact, ImpactEstimator, equivalents, sustainability_score
 from .ledger import Ledger, cache_key, month_start_ts
-from .providers import Provider, ProviderError, SimulatedProvider, build_providers
+from .providers import Provider, ProviderError, ProviderResult, SimulatedProvider, build_providers
 from .router import Constraints, Decision, Router
 
 log = logging.getLogger("ecoroute")
@@ -31,16 +32,21 @@ class ChatOutcome:
     fallback_used: bool
     request_id: int | None
     errors: list[str]
+    tool_calls: list[dict] | None = None
+    finish_reason: str = "stop"
+    team: str | None = None
+    extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "request_id": self.request_id, "model_id": self.model_id, "source": self.source,
-            "response": self.text, "latency_ms": round(self.latency_ms, 1),
+            "response": self.text, "tool_calls": self.tool_calls, "finish_reason": self.finish_reason,
+            "team": self.team, "latency_ms": round(self.latency_ms, 1),
             "impact": self.impact, "baseline": self.baseline, "savings": self.savings,
             "equivalents_saved": equivalents(max(self.savings["energy_wh"], 0), max(self.savings["carbon_g"], 0),
                                              max(self.savings["water_ml"], 0)),
             "fallback_used": self.fallback_used, "errors": self.errors,
-            "decision": self.decision.to_dict(),
+            "decision": self.decision.to_dict(), **self.extra,
         }
 
 
@@ -120,86 +126,152 @@ class EcoRouteService:
     @staticmethod
     def _normalise(prompt: str | None, messages: list[dict] | None) -> list[dict]:
         if messages:
-            return [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
+            return [_norm_message(m) for m in messages]
         if not prompt:
             raise ValueError("Provide 'prompt' or 'messages'.")
         return [{"role": "user", "content": prompt}]
 
     async def decide(self, prompt: str | None = None, messages: list[dict] | None = None,
-                     policy: str | None = None, constraints: dict | None = None) -> Decision:
+                     policy: str | None = None, constraints: dict | None = None,
+                     options: dict | None = None) -> Decision:
         msgs = self._normalise(prompt, messages)
         await self.refresh_grid()
-        last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+        last_user = last_prompt(msgs)
         history = sum(estimate_tokens(m["content"]) for m in msgs) - estimate_tokens(last_user)
         cx = analyze(last_user, history_tokens=history)
         available, _ = await self.availability()
-        return self.router.route(cx, available, policy or self.settings.default_policy,
-                                 Constraints.from_dict(constraints), self.budget_status())
+        k = Constraints.from_dict(constraints)
+        if (options or {}).get("tools"):
+            k.needs_tools = True
+        return self.router.route(cx, available, policy or self.settings.default_policy, k, self.budget_status())
+
+    def _cached(self, msgs, decision, use_cache, options) -> tuple[str, dict | None]:
+        """Cache key and hit (if any). Requests with tools are never cached: tool results change."""
+        key = cache_key(msgs, decision.required_tier)
+        if not (use_cache and self.settings.cache_enabled) or (options or {}).get("tools"):
+            return key, None
+        return key, self.ledger.cache_get(key, self.settings.cache_ttl_hours * 3600)
+
+    def _from_cache(self, decision, hit, t0, errors, msgs, team) -> ChatOutcome:
+        base = self.estimator.estimate(self.catalog.get(decision.baseline_model),
+                                       hit["input_tokens"], hit["output_tokens"]).to_dict()
+        zero = {"energy_wh": 0.0, "carbon_g": 0.0, "water_ml": 0.0, "cost_usd": 0.0,
+                "input_tokens": hit["input_tokens"], "output_tokens": hit["output_tokens"]}
+        res = ProviderResult(hit["response"], hit["input_tokens"], hit["output_tokens"], (time.perf_counter() - t0) * 1000)
+        return self._finish(decision, hit["model_id"], res, "cache", zero, base, False, errors, msgs, team)
+
+    def _measure(self, decision, model_id, res: ProviderResult, msgs, key, use_cache, options, fallback, errors, team):
+        model = self.catalog.get(model_id)
+        in_tok = res.input_tokens or sum(estimate_tokens(m["content"]) for m in msgs)
+        out_tok = res.output_tokens or estimate_tokens(res.text) + 20 * len(res.tool_calls or [])
+        imp = self.estimator.estimate(model, in_tok, out_tok).to_dict()
+        base = self.estimator.estimate(self.catalog.get(decision.baseline_model), in_tok, out_tok).to_dict()
+        if use_cache and self.settings.cache_enabled and res.text and not res.tool_calls and not (options or {}).get("tools"):
+            self.ledger.cache_put(key, model_id, res.text, in_tok, out_tok)
+        return self._finish(decision, model_id, res, "simulated" if res.simulated else "live",
+                            imp, base, fallback, errors, msgs, team)
+
+    def _target(self, model_id: str, cx: dict, max_tokens: int | None, mode: str) -> tuple[Provider, int]:
+        model = self.catalog.get(model_id)
+        if mode == "simulate":
+            return self.simulator, cx["expected_output_tokens"]
+        provider = self.providers.get(model.provider)
+        if provider is None:
+            raise ProviderError(f"no provider configured for {model.provider}")
+        return provider, max_tokens or min(4096, max(256, int(cx["expected_output_tokens"] * 2.5)))
 
     async def chat(self, prompt: str | None = None, messages: list[dict] | None = None,
                    policy: str | None = None, constraints: dict | None = None,
-                   use_cache: bool = True, max_tokens: int | None = None) -> ChatOutcome:
+                   use_cache: bool = True, max_tokens: int | None = None,
+                   options: dict | None = None, team: str | None = None) -> ChatOutcome:
         msgs = self._normalise(prompt, messages)
-        decision = await self.decide(messages=msgs, policy=policy, constraints=constraints)
+        decision = await self.decide(messages=msgs, policy=policy, constraints=constraints, options=options)
         _, mode = await self.availability()
-        cx = decision.complexity
-        base_model = self.catalog.get(decision.baseline_model)
         errors: list[str] = []
         t0 = time.perf_counter()
 
         # 1) Cache: a repeated prompt costs (almost) nothing.
-        key = cache_key(msgs, decision.required_tier)
-        if use_cache and self.settings.cache_enabled:
-            hit = self.ledger.cache_get(key, self.settings.cache_ttl_hours * 3600)
-            if hit:
-                base = self.estimator.estimate(base_model, hit["input_tokens"], hit["output_tokens"]).to_dict()
-                zero = {"energy_wh": 0.0, "carbon_g": 0.0, "water_ml": 0.0, "cost_usd": 0.0,
-                        "input_tokens": hit["input_tokens"], "output_tokens": hit["output_tokens"]}
-                return self._finish(decision, hit["model_id"], hit["response"], "cache", zero, base,
-                                    (time.perf_counter() - t0) * 1000, False, errors, cx, last_prompt(msgs))
+        key, hit = self._cached(msgs, decision, use_cache, options)
+        if hit:
+            return self._from_cache(decision, hit, t0, errors, msgs, team)
 
         # 2) Execute, falling back down the ranked list on provider errors.
-        budget_tokens = max_tokens or min(4096, max(256, int(cx["expected_output_tokens"] * 2.5)))
-        chain = [decision.model_id] + decision.fallbacks
-        for i, model_id in enumerate(chain):
-            model = self.catalog.get(model_id)
-            simulated = mode == "simulate"
-            provider = self.simulator if simulated else self.providers.get(model.provider)
+        for i, model_id in enumerate([decision.model_id] + decision.fallbacks):
             try:
-                res = await provider.complete(model, msgs, cx["expected_output_tokens"] if simulated else budget_tokens)
+                provider, budget = self._target(model_id, decision.complexity, max_tokens, mode)
+                res = await provider.complete(self.catalog.get(model_id), msgs, budget, options)
             except (ProviderError, httpx.HTTPError, KeyError, IndexError) as e:
                 errors.append(f"{model_id}: {e}")
                 log.warning("provider failed, falling back: %s", e)
                 continue
-            in_tok = res.input_tokens or sum(estimate_tokens(m["content"]) for m in msgs)
-            out_tok = res.output_tokens or estimate_tokens(res.text)
-            imp = self.estimator.estimate(model, in_tok, out_tok).to_dict()
-            base = self.estimator.estimate(base_model, in_tok, out_tok).to_dict()
-            if use_cache and self.settings.cache_enabled and res.text:
-                self.ledger.cache_put(key, model_id, res.text, in_tok, out_tok)
-            return self._finish(decision, model_id, res.text, "simulated" if res.simulated else "live",
-                                imp, base, res.latency_ms, i > 0, errors, cx, last_prompt(msgs))
+            return self._measure(decision, model_id, res, msgs, key, use_cache, options, i > 0, errors, team)
         raise RuntimeError("All candidate models failed: " + "; ".join(errors))
 
-    def _finish(self, decision, model_id, text, source, imp, base, latency, fallback, errors, cx, prompt):
+    async def stream_chat(self, prompt: str | None = None, messages: list[dict] | None = None,
+                          policy: str | None = None, constraints: dict | None = None,
+                          use_cache: bool = True, max_tokens: int | None = None,
+                          options: dict | None = None, team: str | None = None) -> AsyncIterator[dict]:
+        """Like :meth:`chat`, but yields ``{"type": "model"|"delta"|"done", ...}`` events as text arrives.
+
+        Fallback to the next model only happens before the first token; after that an error ends the stream.
+        """
+        msgs = self._normalise(prompt, messages)
+        decision = await self.decide(messages=msgs, policy=policy, constraints=constraints, options=options)
+        _, mode = await self.availability()
+        errors: list[str] = []
+        t0 = time.perf_counter()
+
+        key, hit = self._cached(msgs, decision, use_cache, options)
+        if hit:
+            yield {"type": "model", "model_id": hit["model_id"], "decision": decision}
+            yield {"type": "delta", "text": hit["response"]}
+            yield {"type": "done", "outcome": self._from_cache(decision, hit, t0, errors, msgs, team)}
+            return
+
+        for i, model_id in enumerate([decision.model_id] + decision.fallbacks):
+            started = False
+            try:
+                provider, budget = self._target(model_id, decision.complexity, max_tokens, mode)
+                async for ev in provider.stream(self.catalog.get(model_id), msgs, budget, options):
+                    if not started:
+                        started = True
+                        yield {"type": "model", "model_id": model_id, "decision": decision}
+                    if ev.done:
+                        outcome = self._measure(decision, model_id, ev.result, msgs, key, use_cache, options,
+                                                i > 0, errors, team)
+                        yield {"type": "done", "outcome": outcome}
+                        return
+                    if ev.text:
+                        yield {"type": "delta", "text": ev.text}
+            except (ProviderError, httpx.HTTPError, KeyError, IndexError, ValueError) as e:
+                errors.append(f"{model_id}: {e}")
+                log.warning("stream failed on %s: %s", model_id, e)
+                if started:
+                    yield {"type": "error", "message": str(e)}
+                    return
+        yield {"type": "error", "message": "All candidate models failed: " + "; ".join(errors)}
+
+    def _finish(self, decision, model_id, res: ProviderResult, source, imp, base, fallback, errors, msgs, team):
         model = self.catalog.get(model_id)
         savings = {k: base[k] - imp[k] for k in ("energy_wh", "carbon_g", "water_ml", "cost_usd")}
         for k in ("energy_wh", "carbon_g", "water_ml", "cost_usd"):
             savings[k.split("_")[0] + "_pct"] = round(100 * savings[k] / base[k], 2) if base[k] else 0.0
         sust = 100.0 if source == "cache" else sustainability_score(Impact(**imp))
+        cx = decision.complexity
         rid = self.ledger.record({
             "ts": time.time(),
-            "prompt_preview": (prompt[:120] if self.settings.store_prompts else None),
+            "prompt_preview": (last_prompt(msgs)[:120] if self.settings.store_prompts else None),
             "complexity": cx["score"], "tier": cx["tier"], "task_type": cx["task_type"],
             "policy": decision.policy, "model_id": model_id, "provider": model.provider, "source": source,
-            "input_tokens": imp["input_tokens"], "output_tokens": imp["output_tokens"], "latency_ms": latency,
+            "input_tokens": imp["input_tokens"], "output_tokens": imp["output_tokens"], "latency_ms": res.latency_ms,
             "energy_wh": imp["energy_wh"], "carbon_g": imp["carbon_g"], "water_ml": imp["water_ml"],
             "cost_usd": imp["cost_usd"], "baseline_model": decision.baseline_model,
             "baseline_energy_wh": base["energy_wh"], "baseline_carbon_g": base["carbon_g"],
             "baseline_water_ml": base["water_ml"], "baseline_cost_usd": base["cost_usd"],
-            "sustainability_score": sust, "fallback_used": int(fallback),
+            "sustainability_score": sust, "fallback_used": int(fallback), "team": team,
         })
-        return ChatOutcome(decision, model_id, text, source, imp, base, savings, latency, fallback, rid, errors)
+        return ChatOutcome(decision, model_id, res.text, source, imp, base, savings, res.latency_ms, fallback, rid,
+                           errors, res.tool_calls, res.finish_reason, team)
 
     # ------------------------------------------------------------------ catalog view
     def models_view(self, available: set[str]) -> list[dict]:
@@ -220,3 +292,15 @@ class EcoRouteService:
 
 def last_prompt(msgs: list[dict]) -> str:
     return next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+
+
+def _norm_message(m: dict) -> dict:
+    """Keep the OpenAI fields providers need; flatten multi-part content to its text parts."""
+    content = m.get("content")
+    if isinstance(content, list):
+        content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+    out = {"role": m.get("role") or "user", "content": "" if content is None else str(content)}
+    for k in ("tool_calls", "tool_call_id", "name"):
+        if m.get(k):
+            out[k] = m[k]
+    return out

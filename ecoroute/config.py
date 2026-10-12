@@ -55,6 +55,9 @@ class Settings:
     ollama_host: str = "http://localhost:11434"
     electricitymaps_api_key: str | None = None
     api_keys: dict[str, str | None] = field(default_factory=dict)
+    # Client access keys → team name. Empty = open access (fine for local use and demos).
+    access_keys: dict[str, str | None] = field(default_factory=dict)
+    admin_key: str | None = None  # required for reset/budget/seed when set
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -75,6 +78,8 @@ class Settings:
             request_timeout_s=_float("ECOROUTE_TIMEOUT_S", 60.0),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             electricitymaps_api_key=os.getenv("ELECTRICITYMAPS_API_KEY") or None,
+            access_keys=parse_access_keys(os.getenv("ECOROUTE_API_KEYS", "")),
+            admin_key=os.getenv("ECOROUTE_ADMIN_KEY") or None,
             api_keys={
                 "openai": os.getenv("OPENAI_API_KEY") or None,
                 "anthropic": os.getenv("ANTHROPIC_API_KEY") or None,
@@ -85,3 +90,13 @@ class Settings:
                 "xai": os.getenv("XAI_API_KEY") or None,
             },
         )
+
+
+def parse_access_keys(raw: str) -> dict[str, str | None]:
+    """``"key1:team-a, key2:team-b, key3"`` → ``{"key1": "team-a", "key2": "team-b", "key3": None}``."""
+    out: dict[str, str | None] = {}
+    for item in raw.split(","):
+        key, _, team = item.strip().partition(":")
+        if key.strip():
+            out[key.strip()] = team.strip() or None
+    return out
