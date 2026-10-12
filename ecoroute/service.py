@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -19,6 +20,9 @@ from .quality import check_answer, judge_prompt, parse_verdict
 from .router import Constraints, Decision, Router
 
 log = logging.getLogger("ecoroute")
+
+CONCISE_INSTRUCTION = ("Answer as concisely as possible while staying correct and complete. Lead with the answer, "
+                       "skip preamble, restating the question and closing summaries.")
 
 
 @dataclass
@@ -157,9 +161,20 @@ class EcoRouteService:
                 out[model_id] = round(30 * f["down"] / n * min(1.0, n / 10), 2)
         return out
 
-    def _cached(self, msgs, decision, use_cache, options) -> tuple[str, dict | None]:
+    def _concise(self, msgs, decision, constraints, max_tokens) -> tuple[list[dict], int | None, bool]:
+        """Concise mode: ask for a short answer and cap output near the tier's expected length.
+
+        Output tokens dominate inference energy, so a shorter answer is a direct saving.
+        """
+        k = Constraints.from_dict(constraints)
+        if not (self.settings.concise if k.concise is None else k.concise):
+            return msgs, max_tokens, False
+        cap = max(128, int(decision.complexity["expected_output_tokens"] * 1.2))
+        return [{"role": "system", "content": CONCISE_INSTRUCTION}] + msgs, min(max_tokens or cap, cap), True
+
+    def _cached(self, msgs, decision, use_cache, options, variant: str = "") -> tuple[str, dict | None]:
         """Cache key and hit (if any). Requests with tools are never cached: tool results change."""
-        key = cache_key(msgs, decision.required_tier)
+        key = cache_key(msgs, decision.required_tier, variant)
         if not (use_cache and self.settings.cache_enabled) or (options or {}).get("tools"):
             return key, None
         return key, self.ledger.cache_get(key, self.settings.cache_ttl_hours * 3600)
@@ -201,9 +216,10 @@ class EcoRouteService:
         _, mode = await self.availability()
         errors: list[str] = []
         t0 = time.perf_counter()
+        send, max_tokens, concise = self._concise(msgs, decision, constraints, max_tokens)
 
-        # 1) Cache: a repeated prompt costs (almost) nothing.
-        key, hit = self._cached(msgs, decision, use_cache, options)
+        # 1) Cache: a repeated prompt (or the same question worded slightly differently) costs (almost) nothing.
+        key, hit = self._cached(msgs, decision, use_cache, options, "concise" if concise else "")
         if hit:
             return self._from_cache(decision, hit, t0, errors, msgs, team)
 
@@ -211,15 +227,16 @@ class EcoRouteService:
         for i, model_id in enumerate([decision.model_id] + decision.fallbacks):
             try:
                 provider, budget = self._target(model_id, decision.complexity, max_tokens, mode)
-                res = await provider.complete(self.catalog.get(model_id), msgs, budget, options)
+                res = await provider.complete(self.catalog.get(model_id), send, budget, options)
             except (ProviderError, httpx.HTTPError, KeyError, IndexError) as e:
                 errors.append(f"{model_id}: {e}")
                 log.warning("provider failed, falling back: %s", e)
                 continue
             out = self._measure(decision, model_id, res, msgs, key, use_cache, options, i > 0, errors, team)
+            out.extra["concise"] = concise
             k = Constraints.from_dict(constraints)
             if (self.settings.cascade if k.cascade is None else k.cascade) and not res.simulated:
-                out = await self._cascade(out, res, msgs, mode, max_tokens, options, team)
+                out = await self._cascade(out, res, send, mode, max_tokens, options, team)
             return out
         raise RuntimeError("All candidate models failed: " + "; ".join(errors))
 
@@ -236,8 +253,9 @@ class EcoRouteService:
         _, mode = await self.availability()
         errors: list[str] = []
         t0 = time.perf_counter()
+        send, max_tokens, concise = self._concise(msgs, decision, constraints, max_tokens)
 
-        key, hit = self._cached(msgs, decision, use_cache, options)
+        key, hit = self._cached(msgs, decision, use_cache, options, "concise" if concise else "")
         if hit:
             yield {"type": "model", "model_id": hit["model_id"], "decision": decision}
             yield {"type": "delta", "text": hit["response"]}
@@ -248,7 +266,7 @@ class EcoRouteService:
             started = False
             try:
                 provider, budget = self._target(model_id, decision.complexity, max_tokens, mode)
-                async for ev in provider.stream(self.catalog.get(model_id), msgs, budget, options):
+                async for ev in provider.stream(self.catalog.get(model_id), send, budget, options):
                     if not started:
                         started = True
                         yield {"type": "model", "model_id": model_id, "decision": decision}
@@ -396,6 +414,66 @@ class EcoRouteService:
             self.ledger.payload_put(rid, msgs, res.text, 7 * 86400)
         return ChatOutcome(decision, model_id, res.text, source, imp, base, savings, res.latency_ms, fallback, rid,
                            errors, res.tool_calls, res.finish_reason, team)
+
+    # ------------------------------------------------------------------ carbon-aware batches
+    async def submit_batch(self, items: list[dict], deadline_hours: float = 24, team: str | None = None,
+                           policy: str = "eco", max_carbon_g_per_kwh: float | None = None) -> dict:
+        """Queue non-urgent requests to run when the grid is cleaner (or at the deadline, whichever comes first)."""
+        if not items:
+            raise ValueError("A batch needs at least one request.")
+        if len(items) > 1000:
+            raise ValueError("At most 1000 requests per batch.")
+        for it in items:
+            self._normalise(it.get("prompt"), it.get("messages"))  # validate now, not hours later
+        await self.refresh_grid()
+        first = await self.decide(items[0].get("prompt"), items[0].get("messages"), policy, items[0].get("constraints"))
+        region = self.catalog.region_for(self.catalog.get(first.model_id))
+        job = {"id": f"batch_{uuid.uuid4().hex[:16]}", "created": time.time(),
+               "deadline": time.time() + max(0.0, deadline_hours) * 3600, "status": "queued", "team": team,
+               "policy": policy, "max_carbon_g_per_kwh": max_carbon_g_per_kwh,
+               "submit_g_per_kwh": region.carbon_g_per_kwh, "n": len(items)}
+        self.ledger.batch_create(job, items)
+        return self.ledger.batch_get(job["id"])
+
+    def _grid_is_clean(self, region, threshold: float | None) -> bool:
+        """Clean = live intensity at or below the threshold (default: 85% of the region's average)."""
+        if not region.live:
+            return False  # without live data there's no signal to wait for; jobs run at their deadline
+        return region.carbon_g_per_kwh <= (threshold or 0.85 * region.average_g_per_kwh)
+
+    async def run_batches(self, force: bool = False, limit: int = 200) -> dict:
+        """Run queued batch items whose grid is clean now, or whose deadline is within the next hour."""
+        await self.refresh_grid()
+        ran = waiting = 0
+        for job in self.ledger.batch_jobs():
+            due = force or time.time() >= job["deadline"] - 3600
+            full = self.ledger.batch_get(job["id"])
+            for it in full["items"]:
+                if it["status"] != "queued" or ran >= limit:
+                    continue
+                req = it["request"]
+                d = await self.decide(req.get("prompt"), req.get("messages"), req.get("policy") or job["policy"],
+                                      req.get("constraints"))
+                region = self.catalog.region_for(self.catalog.get(d.model_id))
+                if not (due or self._grid_is_clean(region, job["max_carbon_g_per_kwh"])):
+                    waiting += 1
+                    continue
+                try:
+                    out = await self.chat(req.get("prompt"), req.get("messages"), req.get("policy") or job["policy"],
+                                          req.get("constraints"), team=job["team"])
+                    self.ledger.batch_item_update(job["id"], it["idx"], status="done", request_id=out.request_id,
+                                                  response=out.text, model_id=out.model_id,
+                                                  grid_g_per_kwh=region.carbon_g_per_kwh, ran=time.time())
+                except (ValueError, RuntimeError) as e:
+                    self.ledger.batch_item_update(job["id"], it["idx"], status="failed", error=str(e)[:500],
+                                                  ran=time.time())
+                ran += 1
+            items = self.ledger.batch_get(job["id"])["items"]
+            done = sum(i["status"] != "queued" for i in items)
+            finished = done == len(items)
+            self.ledger.batch_update(job["id"], done=done, status="completed" if finished else "running" if done else "queued",
+                                     **({"finished": time.time()} if finished else {}))
+        return {"ran": ran, "waiting": waiting}
 
     # ------------------------------------------------------------------ catalog view
     def models_view(self, available: set[str]) -> list[dict]:

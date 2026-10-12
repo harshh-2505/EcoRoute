@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -34,6 +35,14 @@ CREATE TABLE IF NOT EXISTS cache (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS payloads (request_id INTEGER PRIMARY KEY, created REAL, messages TEXT, response TEXT);
+CREATE TABLE IF NOT EXISTS batch_jobs (
+    id TEXT PRIMARY KEY, created REAL, deadline REAL, status TEXT, team TEXT, policy TEXT,
+    max_carbon_g_per_kwh REAL, submit_g_per_kwh REAL, n INTEGER, done INTEGER DEFAULT 0, finished REAL
+);
+CREATE TABLE IF NOT EXISTS batch_items (
+    job_id TEXT, idx INTEGER, custom_id TEXT, payload TEXT, status TEXT, request_id INTEGER,
+    response TEXT, error TEXT, model_id TEXT, grid_g_per_kwh REAL, ran REAL, PRIMARY KEY (job_id, idx)
+);
 CREATE TABLE IF NOT EXISTS evals (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, request_id INTEGER, tier INTEGER, task_type TEXT,
     model_id TEXT, baseline_model TEXT, judge_model TEXT,
@@ -46,10 +55,39 @@ MIGRATIONS = {"requests": {"team": "TEXT", "feedback": "INTEGER", "feedback_comm
                             "escalated": "INTEGER DEFAULT 0", "check_ok": "INTEGER"}}
 
 
-def cache_key(messages: list[dict], tier_floor: int | None = None) -> str:
-    norm = [{"role": m.get("role"), "content": " ".join(str(m.get("content", "")).lower().split())}
-            for m in messages]
-    return hashlib.sha256(json.dumps([norm, tier_floor], sort_keys=True).encode()).hexdigest()
+CONTRACTIONS = {"what's": "what is", "who's": "who is", "where's": "where is", "how's": "how is", "it's": "it is",
+                "that's": "that is", "there's": "there is", "i'm": "i am", "don't": "do not", "doesn't": "does not",
+                "can't": "cannot", "won't": "will not", "isn't": "is not", "aren't": "are not", "whats": "what is"}
+FILLER = re.compile(r"^(?:(?:hey|hi|hello|please|pls|kindly|can you|could you|would you|will you|tell me|"
+                    r"i want to know|i'd like to know|quick question)\b[\s,:]*)+|"
+                    r"(?:[\s,]*\b(?:please|pls|thanks|thank you|thx)\b)+[\s.!?]*$")
+ARTICLES = re.compile(r"\b(?:a|an|the)\b")
+CODEISH = re.compile(r"[{}()\[\]=<>+*/^`;|\\]|\d\s*-\s*\d")
+
+
+def canonical(text: str) -> str:
+    """Canonical form of a prompt for the response cache.
+
+    Plain-language prompts lose case, punctuation, articles and polite filler, so "What's the capital of
+    France?" and "please tell me what is the capital of france" share one cache entry. Prompts that look like
+    code or maths only lose case and extra whitespace, since a symbol there can change the meaning.
+    """
+    t = " ".join(str(text or "").lower().split())
+    if CODEISH.search(t):
+        return t
+    t = t.replace("\u2019", "'")
+    for k, v in CONTRACTIONS.items():
+        t = re.sub(rf"\b{re.escape(k)}(?=\W|$)", v, t)
+    t = re.sub(r"[^\w\s.%$#@&'-]", " ", t)       # drop ?, !, commas, quotes…
+    t = re.sub(r"(?<!\d)\.(?!\d)", " ", t)          # …and full stops, but keep decimals like 3.5
+    t = FILLER.sub("", " ".join(t.split()))
+    t = ARTICLES.sub(" ", t)
+    return " ".join(t.split())
+
+
+def cache_key(messages: list[dict], tier_floor: int | None = None, variant: str = "") -> str:
+    norm = [{"role": m.get("role"), "content": canonical(m.get("content", ""))} for m in messages]
+    return hashlib.sha256(json.dumps([norm, tier_floor, variant], sort_keys=True).encode()).hexdigest()
 
 
 def _team_filter(team: str | None) -> tuple[str, tuple]:
@@ -180,6 +218,70 @@ class Ledger:
         rated = fb["up"] + fb["down"]
         fb["satisfaction"] = fb["up"] / rated if rated else None
         return {"evals": ev, "evals_by_tier": ev_tier, "recent_evals": recent, "feedback": fb}
+
+    # --------------------------- reporting -----------------------------
+    def period_by_model(self, start: float, end: float, team: str | None = None) -> list[dict]:
+        where, targs = _team_filter(team)
+        with self._lock:
+            return [dict(x) for x in self._conn.execute(
+                f"""SELECT model_id, provider, COUNT(*) n, SUM(source = 'cache') cache_hits,
+                          SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+                          SUM(energy_wh) energy_wh, SUM(carbon_g) carbon_g, SUM(water_ml) water_ml, SUM(cost_usd) cost_usd,
+                          SUM(baseline_energy_wh) baseline_energy_wh, SUM(baseline_carbon_g) baseline_carbon_g,
+                          SUM(baseline_water_ml) baseline_water_ml, SUM(baseline_cost_usd) baseline_cost_usd
+                   FROM requests WHERE ts >= ? AND ts < ?{where} GROUP BY model_id ORDER BY energy_wh DESC""",
+                (start, end, *targs))]
+
+    def period_by_team(self, start: float, end: float) -> list[dict]:
+        with self._lock:
+            return [dict(x) for x in self._conn.execute(
+                """SELECT COALESCE(team, 'unassigned') team, COUNT(*) n, SUM(energy_wh) energy_wh,
+                          SUM(carbon_g) carbon_g, SUM(water_ml) water_ml, SUM(cost_usd) cost_usd,
+                          SUM(baseline_energy_wh) baseline_energy_wh, SUM(baseline_carbon_g) baseline_carbon_g,
+                          SUM(baseline_cost_usd) baseline_cost_usd
+                   FROM requests WHERE ts >= ? AND ts < ? GROUP BY COALESCE(team, 'unassigned') ORDER BY n DESC""",
+                (start, end))]
+
+    # ----------------------------- batches ------------------------------
+    def batch_create(self, job: dict, items: list[dict]) -> None:
+        with self._lock:
+            self._conn.execute(f"INSERT INTO batch_jobs ({', '.join(job)}) VALUES ({', '.join('?' for _ in job)})",
+                               list(job.values()))
+            self._conn.executemany(
+                "INSERT INTO batch_items (job_id, idx, custom_id, payload, status) VALUES (?, ?, ?, ?, 'queued')",
+                [(job["id"], i, it.get("custom_id"), json.dumps(it)) for i, it in enumerate(items)])
+            self._conn.commit()
+
+    def batch_jobs(self, statuses: tuple[str, ...] = ("queued", "running")) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM batch_jobs WHERE status IN ({', '.join('?' for _ in statuses)}) ORDER BY deadline",
+                statuses).fetchall()
+        return [dict(r) for r in rows]
+
+    def batch_get(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._conn.execute("SELECT * FROM batch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                return None
+            items = self._conn.execute("SELECT * FROM batch_items WHERE job_id = ? ORDER BY idx", (job_id,)).fetchall()
+        out = dict(job)
+        out["items"] = [{**{k: v for k, v in dict(r).items() if k != "payload"}, "request": json.loads(r["payload"])}
+                        for r in items]
+        return out
+
+    def batch_item_update(self, job_id: str, idx: int, **fields) -> None:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE batch_items SET {sets} WHERE job_id = ? AND idx = ?",
+                               (*fields.values(), job_id, idx))
+            self._conn.commit()
+
+    def batch_update(self, job_id: str, **fields) -> None:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE batch_jobs SET {sets} WHERE id = ?", (*fields.values(), job_id))
+            self._conn.commit()
 
     def clear(self) -> None:
         with self._lock:

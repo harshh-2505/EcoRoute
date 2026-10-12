@@ -34,6 +34,11 @@ CARBON_BOUNDS_G = (0.001, 2.0)
 WATER_BOUNDS_ML = (0.01, 15.0)
 COST_BOUNDS_USD = (0.000005, 0.05)
 
+# Multiplicative uncertainty (×/÷) per estimation method, used for the low–high ranges in reports.
+# Device figures come from measured power; compute estimates depend on serving efficiency; price-based
+# estimates for closed models carry the most doubt.
+UNCERTAINTY = {"device": 1.5, "compute+price": 1.6, "price": 2.5}
+
 # Everyday equivalents
 PHONE_CHARGE_WH = 15.0          # one full smartphone charge
 LED_BULB_W = 10.0               # 10 W LED bulb

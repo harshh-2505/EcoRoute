@@ -44,6 +44,11 @@ class Region:
     water_l_per_kwh: float
     zone: str | None = None
     live: bool = False  # True when carbon intensity came from a live API
+    average_g_per_kwh: float | None = None  # the static average from grid.yaml, kept when live data arrives
+
+    def __post_init__(self):
+        if self.average_g_per_kwh is None:
+            self.average_g_per_kwh = self.carbon_g_per_kwh
 
 
 class Catalog:
