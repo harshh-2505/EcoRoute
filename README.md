@@ -33,6 +33,7 @@ On the bundled 66-prompt benchmark (simulate mode, estimates), routing cuts ener
 | **Metrics** | SQLite ledger of every request: tokens, latency, Wh, gCO₂e, mL water, $, baseline counterfactual, sustainability score; summaries, time series and everyday equivalents. |
 | **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in, with streaming and tool calling), CLI. |
 | **Quality safeguards** | Shadow evaluations grade routed answers against the baseline with a blind LLM judge; cascade mode re-asks a stronger model when an answer clearly fails; 👍/👎 feedback re-asks on demand and steers future routing away from models users dislike. |
+| **Eco receipt** | A drop-in script (`/static/receipt.js`) that shows end users which model answered and what it saved, built for AI products that embed EcoRoute. |
 | **Teams & access** | Optional API keys mapped to teams; every request is attributed, and a team key only sees its own metrics. |
 | **Runs without keys** | Simulate mode exercises the full pipeline with no API keys — ideal for demos. |
 
@@ -162,6 +163,19 @@ Right-sizing only matters if answers stay good. EcoRoute gives you three ways to
 
 Full prompts and answers are kept for 7 days (only when `ECOROUTE_STORE_PROMPTS` is on) so that
 feedback and evaluations can use them.
+
+### Eco receipt for your product
+
+```html
+<script src="https://your-ecoroute-host/static/receipt.js"></script>
+<div id="receipt"></div>
+<script>EcoReceipt.render("#receipt", completion);  // any EcoRoute response, or its `ecoroute` block</script>
+```
+
+The badge shows the model, energy, CO₂e, water and the saving against the baseline. It renders in a
+shadow root, follows light or dark mode (`theme: "auto" | "dark" | "light"`), and has a one-line
+`compact` form. Elements with a `data-ecoroute='…json…'` attribute are filled in automatically. The
+dashboard's **Embed** tab shows a live preview.
 
 ### Access keys and teams
 

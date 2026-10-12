@@ -34,7 +34,9 @@
 <nav class="tabs" role="tablist">
   <button class="tab active" data-tab="playground"><em>01</em>Playground</button>
   <button class="tab" data-tab="impact"><em>02</em>Impact</button>
-  <button class="tab" data-tab="models"><em>03</em>Model efficiency</button>
+  <button class="tab" data-tab="quality"><em>03</em>Quality</button>
+  <button class="tab" data-tab="models"><em>04</em>Model efficiency</button>
+  <button class="tab" data-tab="embed"><em>05</em>Embed</button>
 </nav>
 
 <main>
@@ -53,6 +55,8 @@
         </div>
         <label class="chk"><input type="checkbox" id="localOnly"><span></span>Local only</label>
         <label class="chk"><input type="checkbox" id="useCache" checked><span></span>Cache</label>
+        <label class="chk" title="Ask for a brief answer and cap output tokens"><input type="checkbox" id="concise"><span></span>Concise</label>
+        <label class="chk" title="Check the answer and re-ask a stronger model if it clearly failed (live mode)"><input type="checkbox" id="cascade"><span></span>Cascade</label>
         <div class="grow"></div>
         <button class="btn ghost" id="btnRoute">Route only</button>
         <button class="btn" id="btnRun">Route &amp; run <b aria-hidden="true">→</b></button>
@@ -83,7 +87,18 @@
 
       <div class="card" id="responseCard">
         <div class="eyebrow">Response <span class="pill" id="rSource"></span></div>
+        <div class="notes" id="rNotes"></div>
         <pre class="response" id="rText"></pre>
+        <div class="after">
+          <div id="rReceipt" class="receipt-slot"></div>
+          <div class="fb" id="rFeedback" role="group" aria-label="Rate this answer">
+            <span class="fb-q">Was this answer good enough?</span>
+            <button class="btn ghost small" data-r="up">▲ Yes</button>
+            <button class="btn ghost small" data-r="down">▼ No</button>
+            <button class="btn small" data-r="escalate" title="Re-ask one tier up, excluding this model">Ask a stronger model <b aria-hidden="true">→</b></button>
+            <span class="fb-done fine" id="rFbDone"></span>
+          </div>
+        </div>
       </div>
 
       <div class="card">
@@ -99,6 +114,8 @@
     <div class="toolbar">
       <div class="seg" id="range"><button data-v="1">24 h</button><button data-v="7">7 d</button><button data-v="30" class="on">30 d</button><button data-v="0">All</button></div>
       <div class="grow"></div>
+      <button class="btn ghost" id="btnReport" title="Printable monthly sustainability report">Monthly report ↗</button>
+      <button class="btn ghost" id="btnCsv">CSV</button>
       <button class="btn ghost" id="btnSeed" title="Simulate mode only">Load demo traffic</button>
       <button class="btn ghost danger" id="btnReset">Reset metrics</button>
     </div>
@@ -118,9 +135,43 @@
         <button class="btn ghost" id="btnBudget">Save budgets</button>
       </div>
     </div>
+    <div class="card" id="teamCard">
+      <div class="eyebrow">By team <span class="fine">from API keys or the X-EcoRoute-Team header</span></div>
+      <div class="table-wrap"><table class="tbl" id="teams"></table></div>
+    </div>
     <div class="card">
       <div class="eyebrow">Recent requests</div>
       <div class="table-wrap"><table class="tbl" id="recent"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================ QUALITY ============================ -->
+  <section id="quality" class="panel">
+    <div class="toolbar">
+      <div class="seg" id="qRange"><button data-v="7">7 d</button><button data-v="30" class="on">30 d</button><button data-v="0">All</button></div>
+      <div class="grow"></div>
+      <span class="fine" id="qConfig"></span>
+    </div>
+    <div class="kpis" id="qKpis"></div>
+    <div class="grid2">
+      <div class="card">
+        <div class="eyebrow">Judged as good as the baseline, by tier</div>
+        <div class="parity" id="qTiers"></div>
+        <p class="fine">For a sample of live requests, the same prompt also goes to the baseline model and a judge grades both answers without knowing which is which. Set <code>ECOROUTE_SHADOW_RATE</code> to turn it on.</p>
+      </div>
+      <div class="card how">
+        <div class="eyebrow">How EcoRoute protects answer quality</div>
+        <ol>
+          <li><b>Shadow evaluations.</b> Blind side-by-side grading against the baseline. Their energy is logged as overhead and kept out of the savings.</li>
+          <li><b>Cascade.</b> Each answer gets a quick check for clear failures: empty, cut off, refused, far too short, or missing code. A failed answer goes to the next stronger model, and both attempts are counted.</li>
+          <li><b>Feedback.</b> ▼ on an answer can re-ask one tier up. After three votes, a model's thumbs-down rate lowers its quality score in routing.</li>
+        </ol>
+        <div id="qPenalties" class="fine"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Recent shadow evaluations</div>
+      <div class="table-wrap"><table class="tbl" id="qEvals"></table></div>
     </div>
   </section>
 
@@ -155,9 +206,30 @@
       <p class="fine" id="sources"></p>
     </div>
   </section>
+
+  <!-- ============================ EMBED ============================ -->
+  <section id="embed" class="panel">
+    <div class="grid2">
+      <div class="card">
+        <div class="eyebrow">Eco receipt <span class="fine">show users what each answer cost the planet</span></div>
+        <p class="fine">A small badge for your own product. It reads the <code>ecoroute</code> block that every EcoRoute response carries, renders inside a shadow root so your styles stay untouched, and follows the page's light or dark theme.</p>
+        <div class="preview" id="embedPreview">
+          <div class="bubble">Heat pumps move heat instead of making it. They pull warmth from outside air or the ground and pump it indoors, using about a third of the electricity of a resistive heater.</div>
+          <div id="embedReceipt"></div>
+          <div id="embedReceiptCompact"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="eyebrow">Add it in three lines</div>
+        <pre class="code" id="embedCode"></pre>
+        <p class="fine">Or put the JSON in an attribute and the script fills it in on load: <code>&lt;div data-ecoroute='…'&gt;&lt;/div&gt;</code>. Add <code>data-compact</code> for a one-line version. Options: <code>theme</code> (<code>auto</code>, <code>dark</code>, <code>light</code>), <code>compact</code>, <code>label</code>.</p>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer><span>EcoRoute · sustainability in the age of AI</span><span>Impact figures are transparent estimates, see <code>docs/METHODOLOGY.md</code></span></footer>
+<script src="/static/receipt.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

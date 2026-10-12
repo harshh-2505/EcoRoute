@@ -69,8 +69,11 @@ def test_seed_timeseries_and_reset(client):
 
 
 def test_dashboard_served(client):
-    assert client.get("/").status_code == 200
+    page = client.get("/")
+    assert page.status_code == 200 and 'data-tab="quality"' in page.text and 'data-tab="embed"' in page.text
     assert client.get("/static/app.js").status_code == 200
+    receipt = client.get("/static/receipt.js")
+    assert receipt.status_code == 200 and "EcoReceipt" in receipt.text
 
 
 def test_bad_request(client):
