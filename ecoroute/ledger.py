@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS requests (
     baseline_model TEXT,
     baseline_energy_wh REAL, baseline_carbon_g REAL, baseline_water_ml REAL, baseline_cost_usd REAL,
     sustainability_score REAL,
-    fallback_used INTEGER DEFAULT 0
+    fallback_used INTEGER DEFAULT 0,
+    team TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS cache (
@@ -29,12 +30,22 @@ CREATE TABLE IF NOT EXISTS cache (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 """
+# Columns added after the first release; older databases are migrated on open.
+MIGRATIONS = {"requests": {"team": "TEXT"}}
 
 
 def cache_key(messages: list[dict], tier_floor: int | None = None) -> str:
     norm = [{"role": m.get("role"), "content": " ".join(str(m.get("content", "")).lower().split())}
             for m in messages]
     return hashlib.sha256(json.dumps([norm, tier_floor], sort_keys=True).encode()).hexdigest()
+
+
+def _team_filter(team: str | None) -> tuple[str, tuple]:
+    if not team:
+        return "", ()
+    if team == "unassigned":
+        return " AND team IS NULL", ()
+    return " AND team = ?", (team,)
 
 
 def month_start_ts(now: float | None = None) -> float:
@@ -50,6 +61,11 @@ class Ledger:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            for table, cols in MIGRATIONS.items():
+                have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                for col, typ in cols.items():
+                    if col not in have:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             self._conn.commit()
 
     def close(self) -> None:
@@ -69,9 +85,11 @@ class Ledger:
             self._conn.execute("UPDATE requests SET ts = ? WHERE id = ?", (ts, request_id))
             self._conn.commit()
 
-    def recent(self, limit: int = 50) -> list[dict]:
+    def recent(self, limit: int = 50, team: str | None = None) -> list[dict]:
+        where, args = _team_filter(team)
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM requests ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = self._conn.execute(f"SELECT * FROM requests WHERE 1=1{where} ORDER BY id DESC LIMIT ?",
+                                      (*args, limit)).fetchall()
         return [dict(r) for r in rows]
 
     def clear(self) -> None:
@@ -80,7 +98,9 @@ class Ledger:
             self._conn.execute("DELETE FROM cache")
             self._conn.commit()
 
-    def summary(self, since: float = 0.0) -> dict:
+    def summary(self, since: float = 0.0, team: str | None = None) -> dict:
+        where, targs = _team_filter(team)
+        args = (since, *targs)
         q = """SELECT COUNT(*) n,
                  COALESCE(SUM(energy_wh),0) energy_wh, COALESCE(SUM(carbon_g),0) carbon_g,
                  COALESCE(SUM(water_ml),0) water_ml, COALESCE(SUM(cost_usd),0) cost_usd,
@@ -90,34 +110,41 @@ class Ledger:
                  COALESCE(AVG(latency_ms),0) avg_latency, COALESCE(AVG(sustainability_score),0) avg_sust,
                  COALESCE(SUM(source='cache'),0) cache_hits, COALESCE(SUM(source='live'),0) live,
                  COALESCE(SUM(fallback_used),0) fallbacks
-               FROM requests WHERE ts >= ?"""
+               FROM requests WHERE ts >= ?{where}"""
         with self._lock:
-            r = dict(self._conn.execute(q, (since,)).fetchone())
+            r = dict(self._conn.execute(q.format(where=where), args).fetchone())
             by_model = [dict(x) for x in self._conn.execute(
-                """SELECT model_id, provider, COUNT(*) n, SUM(energy_wh) energy_wh, SUM(carbon_g) carbon_g,
+                f"""SELECT model_id, provider, COUNT(*) n, SUM(energy_wh) energy_wh, SUM(carbon_g) carbon_g,
                           SUM(water_ml) water_ml, SUM(cost_usd) cost_usd, AVG(latency_ms) avg_latency
-                   FROM requests WHERE ts >= ? GROUP BY model_id ORDER BY n DESC""", (since,))]
+                   FROM requests WHERE ts >= ?{where} GROUP BY model_id ORDER BY n DESC""", args)]
             by_tier = [dict(x) for x in self._conn.execute(
-                """SELECT tier, COUNT(*) n, SUM(energy_wh) energy_wh, SUM(baseline_energy_wh) baseline_energy_wh,
-                          SUM(cost_usd) cost_usd FROM requests WHERE ts >= ? GROUP BY tier ORDER BY tier""",
-                (since,))]
+                f"""SELECT tier, COUNT(*) n, SUM(energy_wh) energy_wh, SUM(baseline_energy_wh) baseline_energy_wh,
+                          SUM(cost_usd) cost_usd FROM requests WHERE ts >= ?{where} GROUP BY tier ORDER BY tier""",
+                args)]
             by_task = [dict(x) for x in self._conn.execute(
-                "SELECT task_type, COUNT(*) n FROM requests WHERE ts >= ? GROUP BY task_type ORDER BY n DESC",
-                (since,))]
+                f"SELECT task_type, COUNT(*) n FROM requests WHERE ts >= ?{where} GROUP BY task_type ORDER BY n DESC",
+                args)]
+            by_team = [dict(x) for x in self._conn.execute(
+                f"""SELECT COALESCE(team, 'unassigned') team, COUNT(*) n, SUM(energy_wh) energy_wh,
+                          SUM(baseline_energy_wh) baseline_energy_wh, SUM(carbon_g) carbon_g, SUM(cost_usd) cost_usd,
+                          SUM(baseline_cost_usd) baseline_cost_usd
+                   FROM requests WHERE ts >= ?{where} GROUP BY COALESCE(team, 'unassigned') ORDER BY n DESC""",
+                args)]
         tok = r["in_tok"] + r["out_tok"]
         r["energy_per_1k_tokens_wh"] = r["energy_wh"] / tok * 1000 if tok else 0.0
         r["cost_per_request_usd"] = r["cost_usd"] / r["n"] if r["n"] else 0.0
         r["cache_hit_rate"] = r["cache_hits"] / r["n"] if r["n"] else 0.0
-        return {"totals": r, "by_model": by_model, "by_tier": by_tier, "by_task": by_task}
+        return {"totals": r, "by_model": by_model, "by_tier": by_tier, "by_task": by_task, "by_team": by_team}
 
-    def timeseries(self, since: float, bucket_s: int) -> list[dict]:
+    def timeseries(self, since: float, bucket_s: int, team: str | None = None) -> list[dict]:
+        where, targs = _team_filter(team)
         q = """SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, COUNT(*) n,
                       SUM(energy_wh) energy_wh, SUM(baseline_energy_wh) baseline_energy_wh,
                       SUM(carbon_g) carbon_g, SUM(baseline_carbon_g) baseline_carbon_g,
                       SUM(water_ml) water_ml, SUM(cost_usd) cost_usd, SUM(baseline_cost_usd) baseline_cost_usd
-               FROM requests WHERE ts >= ? GROUP BY bucket ORDER BY bucket"""
+               FROM requests WHERE ts >= ?{where} GROUP BY bucket ORDER BY bucket"""
         with self._lock:
-            return [dict(r) for r in self._conn.execute(q, (bucket_s, bucket_s, since))]
+            return [dict(r) for r in self._conn.execute(q.format(where=where), (bucket_s, bucket_s, since, *targs))]
 
     def month_to_date(self) -> dict:
         with self._lock:

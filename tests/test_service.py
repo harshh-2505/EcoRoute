@@ -11,7 +11,7 @@ class FakeProvider(Provider):
     def configured(self):
         return True
 
-    async def complete(self, model, messages, max_tokens):
+    async def complete(self, model, messages, max_tokens, options=None):
         self.calls += 1
         if self.fail:
             raise ProviderError("boom")

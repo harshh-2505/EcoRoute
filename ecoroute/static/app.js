@@ -15,10 +15,19 @@ const LABEL_COLORS = { A: "--l-A", B: "--l-B", C: "--l-C", D: "--l-D", E: "--l-E
 const cssv = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const labelChip = (l) => `<span class="label" style="background:var(${LABEL_COLORS[l]})">${l}</span>`;
 
-async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+// When the server has API keys configured, the dashboard asks for one once and keeps it in this browser.
+const KEY_STORE = "ecoroute.key";
+const storedKey = () => { try { return localStorage.getItem(KEY_STORE) || ""; } catch { return ""; } };
+async function api(path, opts = {}, retried = false) {
+  const headers = { "Content-Type": "application/json" };
+  if (storedKey()) headers.Authorization = `Bearer ${storedKey()}`;
+  const r = await fetch(path, { ...opts, headers });
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.detail || r.statusText);
+  if (r.status === 401 && !retried) {
+    const k = prompt("This EcoRoute server needs an API key:");
+    if (k) { try { localStorage.setItem(KEY_STORE, k.trim()); } catch { /* private mode */ } return api(path, opts, true); }
+  }
+  if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : r.statusText);
   return body;
 }
 

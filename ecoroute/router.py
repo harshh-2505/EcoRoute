@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from .catalog import Catalog, ModelSpec
 from .complexity import ComplexityResult
 from .impact import Impact, ImpactEstimator, cost_score, sustainability_score
+from .providers import TOOL_PROVIDERS
 
 # weights: sustainability, cost, quality, latency
 POLICIES: dict[str, dict[str, float]] = {
@@ -33,6 +34,7 @@ class Constraints:
     exclude_models: list[str] | None = None
     min_tier: int | None = None              # force at least this tier
     force_model: str | None = None           # bypass routing
+    needs_tools: bool = False                # request carries tool/function definitions
 
     @classmethod
     def from_dict(cls, d: dict | None) -> Constraints:
@@ -107,6 +109,9 @@ class Router:
         weights = dict(POLICIES[effective_policy])
 
         required = max(cx.tier, constraints.min_tier or 1)
+        if constraints.needs_tools and required < 2:
+            required = 2  # the smallest models are unreliable at choosing and filling tool calls
+            reasons.append("Request defines tools → needs a tool-capable model of tier 2 or above.")
         in_tok, out_tok = cx.input_tokens, cx.expected_output_tokens
 
         cands: list[Candidate] = []
@@ -175,6 +180,8 @@ class Router:
             return False, "local-only requested"
         if k.allowed_providers and m.provider not in k.allowed_providers:
             return False, "provider not allowed"
+        if k.needs_tools and (m.provider not in TOOL_PROVIDERS or m.api == "responses"):
+            return False, "no tool-calling support"
         if m.max_tier < required:
             return False, f"under-powered (max tier {m.max_tier} < {required})"
         if k.max_cost_usd is not None and imp.cost_usd > k.max_cost_usd:

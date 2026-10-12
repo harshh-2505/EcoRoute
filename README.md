@@ -29,7 +29,8 @@ On the bundled 66-prompt benchmark (simulate mode, estimates), routing cuts ener
 | **Carbon-aware** | Optional live grid carbon intensity from Electricity Maps. |
 | **Cost & efficiency management** | Per-request cost/energy caps, monthly spend & energy budgets that automatically shift policy, response cache (cache hits cost ~0), fallback chain on provider errors. |
 | **Metrics** | SQLite ledger of every request: tokens, latency, Wh, gCO₂e, mL water, $, baseline counterfactual, sustainability score; summaries, time series and everyday equivalents. |
-| **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in), CLI. |
+| **Interfaces** | Web dashboard, REST API, **OpenAI-compatible** `/v1/chat/completions` endpoint (drop-in, with streaming and tool calling), CLI. |
+| **Teams & access** | Optional API keys mapped to teams; every request is attributed, and a team key only sees its own metrics. |
 | **Runs without keys** | Simulate mode exercises the full pipeline with no API keys — ideal for demos. |
 
 Providers: OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI, Groq (open-weight models) and
@@ -92,6 +93,28 @@ print(r.choices[0].message.content, r.model)   # r.model = the model EcoRoute pi
 ```
 
 The response also carries an `ecoroute` field with the measured impact and savings.
+
+The endpoint supports what real apps send:
+
+* **Streaming** (`stream=True`): native token streaming from OpenAI-compatible providers, Anthropic,
+  Gemini and Ollama. The final chunk carries `usage` and the `ecoroute` impact block. If a provider
+  fails before its first token, EcoRoute falls back to the next model silently.
+* **Tool / function calling** (`tools`, `tool_choice`, `tool` role messages): translated to each
+  provider's format (Anthropic `tool_use`, Gemini `functionCall`, Ollama tools). Requests with tools
+  are routed only to tool-capable models of tier 2 or above, and are never cached.
+* `temperature`, `top_p`, `stop`; multi-part `content` arrays (text parts are used).
+
+### Access keys and teams
+
+```bash
+ECOROUTE_API_KEYS="sk-eco-search:search, sk-eco-support:support"   # key:team pairs
+ECOROUTE_ADMIN_KEY="sk-eco-admin"                                   # reset, budgets, demo seeding
+```
+
+With keys set, every `/v1/*` call needs `Authorization: Bearer <key>` (or `X-API-Key`). Requests are
+logged against the key's team, `/v1/metrics/*` accept `?team=`, and a team key only sees its own
+team's numbers. A key without a team can name one per request with `X-EcoRoute-Team`. With no keys
+configured, EcoRoute stays open, which suits local use and demos.
 
 ## API
 
@@ -170,6 +193,8 @@ rather than assuming it.
 | `ECOROUTE_CATALOG`, `ECOROUTE_GRID` | bundled YAML | your own model catalog / grid data |
 | `ELECTRICITYMAPS_API_KEY` | — | live carbon intensity |
 | `OLLAMA_HOST` | `http://localhost:11434` | local models |
+| `ECOROUTE_API_KEYS` | — | `key:team` pairs; turns on authentication |
+| `ECOROUTE_ADMIN_KEY` | — | key for reset, budget changes and demo seeding |
 
 Model prices in `ecoroute/data/catalog.yaml` are a snapshot — check providers' pricing pages and
 update them (and add new models) before relying on cost figures.
@@ -193,7 +218,7 @@ dashboard data resets when the function cold-starts; use **Load demo traffic** t
 ## Development
 
 ```bash
-pytest            # 43 tests, no network needed
+pytest            # all tests run offline, no network needed
 ruff check .
 python -m benchmarks.run_benchmark
 ```
